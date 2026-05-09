@@ -118,7 +118,7 @@ export default function (pi: ExtensionAPI) {
   let collectedAssistantText: string[] = [];
   let postedThinkingNotice = false;
 
-  // ── Shared send helper ────────────────────────────────────────────────────
+  // ── Shared send helpers ──────────────────────────────────────────────────
 
   async function sendToActiveChannel(text: string): Promise<void> {
     if (!client || !pendingReplyChannelId) return;
@@ -129,6 +129,39 @@ export default function (pi: ExtensionAPI) {
     } catch (err) {
       console.error("[pi-discord-remote] Failed to send message:", err);
     }
+  }
+
+  async function sendImageToActiveChannel(
+    source: { type: "base64"; media_type: string; data: string } | { type: "url"; url: string },
+  ): Promise<void> {
+    if (!client || !pendingReplyChannelId) return;
+    try {
+      const channel = (await client.channels.fetch(pendingReplyChannelId)) as TextChannel | null;
+      if (!channel?.isTextBased()) return;
+      if (source.type === "base64") {
+        const ext = (source.media_type ?? "image/png").split("/")[1] ?? "png";
+        const buffer = Buffer.from(source.data, "base64");
+        await (channel as TextChannel).send({ files: [{ attachment: buffer, name: `image.${ext}` }] });
+      } else if (source.type === "url") {
+        await (channel as TextChannel).send({ files: [{ attachment: source.url }] });
+      }
+    } catch (err) {
+      console.error("[pi-discord-remote] Failed to send image:", err);
+    }
+  }
+
+  /** Recursively collect all image sources from a content block array. */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  function extractImages(content: any[]): Array<{ type: "base64"; media_type: string; data: string } | { type: "url"; url: string }> {
+    const images: Array<{ type: "base64"; media_type: string; data: string } | { type: "url"; url: string }> = [];
+    for (const block of content) {
+      if (block.type === "image" && block.source) {
+        images.push(block.source);
+      } else if (block.type === "tool_result" && Array.isArray(block.content)) {
+        images.push(...extractImages(block.content));
+      }
+    }
+    return images;
   }
 
   // ── Tool emoji / detail ───────────────────────────────────────────────────
@@ -186,15 +219,24 @@ export default function (pi: ExtensionAPI) {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   pi.on("message_end", async (event: any) => {
     if (!pendingReplyChannelId) return;
-    if (event.message.role !== "assistant") return;
 
-    const content = event.message.content as Array<{ type: string; text?: string }>;
-    const text = content
-      .filter((c) => c.type === "text" && typeof c.text === "string")
-      .map((c) => c.text as string)
-      .join("");
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const content = event.message.content as Array<any>;
 
-    if (text.trim()) collectedAssistantText.push(text);
+    // Collect text from assistant messages
+    if (event.message.role === "assistant") {
+      const text = content
+        .filter((c) => c.type === "text" && typeof c.text === "string")
+        .map((c) => c.text as string)
+        .join("");
+      if (text.trim()) collectedAssistantText.push(text);
+    }
+
+    // Forward any images from any role (assistant text, tool results, etc.)
+    const images = extractImages(content);
+    for (const src of images) {
+      await sendImageToActiveChannel(src);
+    }
   });
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
