@@ -2,6 +2,8 @@
 
 > Control your [Pi](https://pi.dev) coding-agent session from Discord.
 
+![pi-discord-remote demo](demo.gif)
+
 Each time you run `/pi-discord-remote start`, the extension automatically creates a **new Discord text channel** named after your current project + date (e.g. `kaleidoscope-may09`). Messages sent in that channel are injected into Pi as user prompts; Pi's responses are posted back. When you stop, the channel is deleted — keeping your server clean within Discord's channel limit.
 
 ## Install
