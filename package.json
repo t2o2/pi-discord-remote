@@ -1,0 +1,36 @@
+{
+  "name": "pi-discord-remote",
+  "version": "0.1.0",
+  "description": "Control your Pi coding-agent session from Discord — each session gets its own auto-created channel",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "discord",
+    "remote-control"
+  ],
+  "author": "Chuan Bai",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/chuanbai/pi-discord-remote"
+  },
+  "homepage": "https://github.com/chuanbai/pi-discord-remote#readme",
+  "files": [
+    "extensions/"
+  ],
+  "pi": {
+    "extensions": [
+      "./extensions"
+    ]
+  },
+  "dependencies": {
+    "discord.js": "^14.0.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@types/node": "^25.6.2",
+    "typescript": "^6.0.3"
+  }
+}
