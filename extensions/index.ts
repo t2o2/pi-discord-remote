@@ -49,6 +49,8 @@ interface Config {
   allowedUserIds?: string[];
   /** React with emoji while processing (default: true) */
   reactions?: boolean;
+  /** Also send tool responses (output/results) after each tool call (default: false) */
+  toolResponses?: boolean;
 }
 
 async function loadConfig(): Promise<Config | null> {
@@ -150,6 +152,20 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
+  /** Extract plain text from a tool_result content block. */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  function extractToolResultText(block: any): string {
+    if (typeof block.content === "string") return block.content;
+    if (Array.isArray(block.content)) {
+      return block.content
+        .filter((c: { type: string }) => c.type === "text")
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        .map((c: any) => c.text as string)
+        .join("\n");
+    }
+    return "";
+  }
+
   /** Recursively collect all image sources from a content block array. */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   function extractImages(content: any[]): Array<{ type: "base64"; media_type: string; data: string } | { type: "url"; url: string }> {
@@ -236,6 +252,19 @@ export default function (pi: ExtensionAPI) {
     const images = extractImages(content);
     for (const src of images) {
       await sendImageToActiveChannel(src);
+    }
+
+    // Optionally send tool responses
+    if (event.message.role === "user" && activeConfig?.toolResponses) {
+      for (const block of content) {
+        if (block.type !== "tool_result") continue;
+        const resultText = extractToolResultText(block);
+        if (!resultText.trim()) continue;
+        const truncated = resultText.length > 500
+          ? resultText.slice(0, 500) + "\n…"
+          : resultText;
+        await sendToActiveChannel(`↩️ \`\`\`\n${truncated}\n\`\`\``);
+      }
     }
   });
 
@@ -436,12 +465,19 @@ export default function (pi: ExtensionAPI) {
             ? allowedRaw.split(",").map((s: string) => s.trim()).filter(Boolean)
             : undefined;
 
+          const toolResponsesRaw = await ctx.ui.input(
+            "Send tool responses to Discord? (yes/no, default: no):",
+            existing?.toolResponses ? "yes" : "no",
+          );
+          const toolResponses = toolResponsesRaw?.trim().toLowerCase() === "yes";
+
           const cfg: Config = {
             token,
             guildId,
             ...(categoryId ? { categoryId } : {}),
             ...(allowedUserIds ? { allowedUserIds } : {}),
             reactions: true,
+            toolResponses,
           };
 
           await saveConfig(cfg);
@@ -507,6 +543,8 @@ export default function (pi: ExtensionAPI) {
                   categoryId: "",
                   allowedUserIds: [],
                   reactions: true,
+                  // Set to true to also post tool outputs/results after each tool call
+                  toolResponses: false,
                 },
                 null,
                 2,
