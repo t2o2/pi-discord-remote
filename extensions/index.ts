@@ -66,13 +66,15 @@ async function saveConfig(cfg: Config): Promise<void> {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-/** Generate a Discord-safe channel name from cwd + short date. */
+/** Generate a Discord-safe channel name from cwd + short date + time (HH-MM). */
 function makeChannelName(cwd: string): string {
   const dir = basename(cwd) || "pi";
   const now = new Date();
   const month = now.toLocaleString("en-US", { month: "short" }).toLowerCase();
   const day = String(now.getDate()).padStart(2, "0");
-  const raw = `${dir}-${month}${day}`;
+  const hh = String(now.getHours()).padStart(2, "0");
+  const mm = String(now.getMinutes()).padStart(2, "0");
+  const raw = `${dir}-${month}${day}-${hh}${mm}`;
   // Discord channel name rules: lowercase, 1-100 chars, only a-z 0-9 - _
   return raw
     .toLowerCase()
