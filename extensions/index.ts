@@ -115,6 +115,45 @@ export default function (pi: ExtensionAPI) {
   let agentBusy = false;
   let pendingReplyChannelId: string | null = null;
   let collectedAssistantText: string[] = [];
+  let postedThinkingNotice = false;
+
+  // ── Shared send helper ────────────────────────────────────────────────────
+
+  async function sendToActiveChannel(text: string): Promise<void> {
+    if (!client || !pendingReplyChannelId) return;
+    try {
+      const channel = (await client.channels.fetch(pendingReplyChannelId)) as TextChannel | null;
+      if (!channel?.isTextBased()) return;
+      await (channel as TextChannel).send(text);
+    } catch (err) {
+      console.error("[pi-discord-remote] Failed to send message:", err);
+    }
+  }
+
+  // ── Tool emoji / detail ───────────────────────────────────────────────────
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  function toolLabel(toolName: string, args: any): string {
+    const emojis: Record<string, string> = {
+      bash: "🔧", read: "📄", edit: "✏️", write: "📝",
+      grep: "🔍", find: "🔎", ls: "📁",
+    };
+    const emoji = emojis[toolName] ?? "⚙️";
+    let detail = "";
+    if (toolName === "bash" && args?.command) {
+      const cmd = String(args.command).replace(/\n/g, " ").slice(0, 80);
+      detail = `: \`${cmd}${args.command.length > 80 ? "…" : ""}\``;
+    } else if (["read", "write"].includes(toolName) && args?.path) {
+      detail = `: \`${args.path}\``;
+    } else if (toolName === "edit" && args?.path) {
+      detail = `: \`${args.path}\``;
+    } else if (toolName === "grep" && args?.pattern) {
+      detail = `: \`${args.pattern}\`${args.path ? ` in \`${args.path}\`` : ""}`;
+    } else if (["find", "ls"].includes(toolName) && args?.path) {
+      detail = `: \`${args.path}\``;
+    }
+    return `${emoji} _${toolName}_${detail}`;
+  }
 
   // ── Collect assistant output ──────────────────────────────────────────────
 
@@ -122,6 +161,25 @@ export default function (pi: ExtensionAPI) {
   pi.on("agent_start", async (_event: any) => {
     agentBusy = true;
     collectedAssistantText = [];
+    postedThinkingNotice = false;
+  });
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  pi.on("message_update", async (event: any) => {
+    if (!pendingReplyChannelId || postedThinkingNotice) return;
+    if (event.message.role !== "assistant") return;
+    const hasThinking = (event.message.content as Array<{ type: string }>)
+      .some((c) => c.type === "thinking");
+    if (hasThinking) {
+      postedThinkingNotice = true;
+      await sendToActiveChannel("💭 _Thinking…_");
+    }
+  });
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  pi.on("tool_execution_start", async (event: any) => {
+    if (!pendingReplyChannelId) return;
+    await sendToActiveChannel(toolLabel(event.toolName, event.args));
   });
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -148,22 +206,20 @@ export default function (pi: ExtensionAPI) {
       return;
     }
 
-    const channelId = pendingReplyChannelId;
     const text = collectedAssistantText.join("\n\n").trim();
-    pendingReplyChannelId = null;
+    // Clear state before sending so sendToActiveChannel still sees the channel ID
     collectedAssistantText = [];
+    // pendingReplyChannelId cleared after send below
 
-    if (!text) return;
-
-    try {
-      const channel = (await client.channels.fetch(channelId)) as TextChannel | null;
-      if (!channel?.isTextBased()) return;
-      for (const chunk of splitMessage(text)) {
-        await (channel as TextChannel).send(chunk);
-      }
-    } catch (err) {
-      console.error("[pi-discord-remote] Failed to send response:", err);
+    if (!text) {
+      pendingReplyChannelId = null;
+      return;
     }
+
+    for (const chunk of splitMessage(text)) {
+      await sendToActiveChannel(chunk);
+    }
+    pendingReplyChannelId = null;
   });
 
   // ── Cleanup helper ───────────────────────────────────────────────────────
