@@ -12,9 +12,9 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/chuanbai/pi-discord-remote"
+    "url": "https://github.com/t2o2/pi-discord-remote"
   },
-  "homepage": "https://github.com/chuanbai/pi-discord-remote#readme",
+  "homepage": "https://github.com/t2o2/pi-discord-remote#readme",
   "files": [
     "extensions/"
   ],
