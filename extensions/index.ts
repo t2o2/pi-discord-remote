@@ -114,6 +114,7 @@ export default function (pi: ExtensionAPI) {
 
   let agentBusy = false;
   let pendingReplyChannelId: string | null = null;
+  let pendingReplyUserId: string | null = null;
   let collectedAssistantText: string[] = [];
   let postedThinkingNotice = false;
 
@@ -213,13 +214,21 @@ export default function (pi: ExtensionAPI) {
 
     if (!text) {
       pendingReplyChannelId = null;
+      pendingReplyUserId = null;
       return;
     }
 
-    for (const chunk of splitMessage(text)) {
+    const chunks = splitMessage(text);
+    // Prepend a mention to the last chunk so the sender is notified when work is done
+    const mention = pendingReplyUserId ? `<@${pendingReplyUserId}> ` : "";
+    const lastIdx = chunks.length - 1;
+    chunks[lastIdx] = mention + chunks[lastIdx];
+
+    for (const chunk of chunks) {
       await sendToActiveChannel(chunk);
     }
     pendingReplyChannelId = null;
+    pendingReplyUserId = null;
   });
 
   // ── Cleanup helper ───────────────────────────────────────────────────────
@@ -332,6 +341,7 @@ export default function (pi: ExtensionAPI) {
       }
 
       pendingReplyChannelId = message.channelId;
+      pendingReplyUserId = message.author.id;
       collectedAssistantText = [];
       pi.sendUserMessage(message.content);
     });
