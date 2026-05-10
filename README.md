@@ -64,6 +64,16 @@ Edit config with `/pi-discord-remote open-config`.
 - **Tool calls** — each tool invocation is labeled (🔧 bash, 📄 read, ✏️ edit, etc.) with a detail line; if `toolResponses` is on, results follow as ↩️/❌ code blocks
 - **`/pi-discord-remote stop`** (or Pi exit) — channel is deleted, bot disconnects
 
+### `ask_user_question` → Discord
+
+Pi's TUI-only `ask_user_question` dialog (from `@juicesharp/rpiv-ask-user-question`) is invisible over Discord remote. When Discord is connected, pi-discord-remote:
+
+1. **Blocks** the original `ask_user_question` via `tool_call` event interception — the TUI dialog never appears
+2. **Registers** `discord_ask_user_question` — a drop-in replacement that formats questions as Discord messages and collects answers from the channel
+3. **Hints** the LLM via `before_agent_start` to prefer `discord_ask_user_question` when Discord is connected
+
+When Discord **is not** connected, the original `ask_user_question` (TUI dialog) works normally as a fallback. No need to uninstall `@juicesharp/rpiv-ask-user-question` — the two extensions coexist gracefully.
+
 ## License
 
 MIT

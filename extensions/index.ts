@@ -257,8 +257,8 @@ export default function (pi: ExtensionAPI) {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   pi.on("tool_execution_start", async (event: any) => {
     if (!pendingReplyChannelId) return;
-    // ask_user_question is handled by our tool override (formatted output)
-    if (event.toolName === "ask_user_question") return;
+    // discord_ask_user_question is handled by our tool (formatted output)
+    if (event.toolName === "discord_ask_user_question") return;
     await sendToActiveChannel(toolLabel(event.toolName, event.args));
   });
 
@@ -464,15 +464,44 @@ export default function (pi: ExtensionAPI) {
     });
   }
 
-  // ── Tool override: ask_user_question → Discord ─────────────────────────
+  // ── Intercept ask_user_question → redirect to Discord version ─────────
 
-  // Override the built-in ask_user_question tool to send questions to
-  // Discord instead of rendering a TUI-only dialog that remote users can't see.
+  // When Discord is connected, block the original ask_user_question (TUI-only)
+  // and tell the LLM to use discord_ask_user_question instead.
+  // When Discord is not connected, let the original tool through as fallback.
+  pi.on("tool_call", async (event, _ctx) => {
+    if (event.toolName !== "ask_user_question") return;
+    if (!client?.isReady()) return; // Discord not ready — let TUI tool work
+    return { block: true, reason: "Discord is connected — use discord_ask_user_question instead." };
+  });
+
+  // ── System prompt hint: prefer Discord version when connected ──────────
+
+  pi.on("before_agent_start", async (event, _ctx) => {
+    if (!client?.isReady()) return;
+    return {
+      systemPrompt:
+        event.systemPrompt +
+        "\n\n" +
+        "When you need to ask the user a clarifying question, use the " +
+        "discord_ask_user_question tool instead of ask_user_question. " +
+        "The Discord version sends questions to the user's Discord channel. " +
+        "If discord_ask_user_question returns an error about no UI, " +
+        "fall back to ask_user_question.",
+    };
+  });
+
+  // ── Tool: discord_ask_user_question → Discord ───────────────────────────
+
+  // Send questions to Discord — avoids the TUI-only dialog from
+  // @juicesharp/rpiv-ask-user-question that remote users can't see.
+  // When Discord is connected, use this tool instead of ask_user_question.
   pi.registerTool({
-    name: "ask_user_question",
-    label: "Ask User Question",
+    name: "discord_ask_user_question",
+    label: "Ask User Question (Discord)",
     description:
-      "Ask the user one or more structured clarifying questions. " +
+      "Ask the user one or more structured clarifying questions via Discord. " +
+      "Use this instead of ask_user_question when Discord is connected. " +
       "Questions and options are forwarded to the Discord channel. " +
       "The user replies with the option number, label, or custom text.",
     parameters: Type.Object({
@@ -518,7 +547,7 @@ export default function (pi: ExtensionAPI) {
           content: [
             {
               type: "text",
-              text: "Discord channel not available. Please answer in the Pi TUI directly.",
+              text: "Discord channel not available. Use ask_user_question instead for TUI-based questions, or connect Discord first.",
             },
           ],
           details: { answers: [], cancelled: true, error: "no_ui" },
