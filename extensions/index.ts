@@ -19,6 +19,7 @@
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { Type } from "typebox";
 import {
   Client,
   ChannelType,
@@ -119,6 +120,22 @@ export default function (pi: ExtensionAPI) {
   let pendingReplyUserId: string | null = null;
   let collectedAssistantText: string[] = [];
   let postedThinkingNotice = false;
+
+  // ── Question-answering state (for overriding ask_user_question) ────────
+  let questionResolver: ((answer: string) => void) | null = null;
+  let questionRejecter: ((reason: Error) => void) | null = null;
+  let questionChannelId: string | null = null;
+  let questionTimeout: ReturnType<typeof setTimeout> | null = null;
+
+  function clearQuestionState(): void {
+    if (questionTimeout) {
+      clearTimeout(questionTimeout);
+      questionTimeout = null;
+    }
+    questionResolver = null;
+    questionRejecter = null;
+    questionChannelId = null;
+  }
 
   // ── Shared send helpers ──────────────────────────────────────────────────
 
@@ -240,6 +257,8 @@ export default function (pi: ExtensionAPI) {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   pi.on("tool_execution_start", async (event: any) => {
     if (!pendingReplyChannelId) return;
+    // ask_user_question is handled by our tool override (formatted output)
+    if (event.toolName === "ask_user_question") return;
     await sendToActiveChannel(toolLabel(event.toolName, event.args));
   });
 
@@ -322,6 +341,11 @@ export default function (pi: ExtensionAPI) {
   // ── Session cleanup ───────────────────────────────────────────────────────
 
   pi.on("session_shutdown", async () => {
+    // Reject any pending question so tool execution doesn't hang
+    if (questionRejecter) {
+      questionRejecter(new Error("Session shut down"));
+    }
+    clearQuestionState();
     if (client) {
       await deleteSessionChannel((_k, _v) => {});
       await client.destroy().catch(() => {});
@@ -402,6 +426,17 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
+      // If waiting for a question answer, route this message to the resolver
+      if (questionResolver && message.channelId === questionChannelId) {
+        if (activeConfig.reactions !== false) {
+          await message.react("✅").catch(() => {});
+        }
+        // Capture before clearing — the resolver clears state
+        const resolve = questionResolver;
+        resolve(message.content);
+        return;
+      }
+
       if (agentBusy) {
         await message.reply("⏳ Still processing the previous message — please wait.").catch(() => {});
         return;
@@ -428,6 +463,249 @@ export default function (pi: ExtensionAPI) {
       activeConfig = null;
     });
   }
+
+  // ── Tool override: ask_user_question → Discord ─────────────────────────
+
+  // Override the built-in ask_user_question tool to send questions to
+  // Discord instead of rendering a TUI-only dialog that remote users can't see.
+  pi.registerTool({
+    name: "ask_user_question",
+    label: "Ask User Question",
+    description:
+      "Ask the user one or more structured clarifying questions. " +
+      "Questions and options are forwarded to the Discord channel. " +
+      "The user replies with the option number, label, or custom text.",
+    parameters: Type.Object({
+      questions: Type.Array(
+        Type.Object({
+          question: Type.String(),
+          header: Type.String(),
+          options: Type.Array(
+            Type.Object({
+              label: Type.String(),
+              description: Type.String(),
+              preview: Type.Optional(Type.String()),
+            }),
+          ),
+          multiSelect: Type.Optional(Type.Boolean()),
+        }),
+      ),
+    }),
+
+    async execute(_toolCallId, params, signal, _onUpdate, _ctx) {
+      const channelId = pendingReplyChannelId;
+      if (!client || !channelId) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: "Discord not connected. Please answer in the Pi TUI directly.",
+            },
+          ],
+          details: { answers: [], cancelled: true, error: "no_ui" },
+        };
+      }
+
+      let channel: TextChannel | null = null;
+      try {
+        const fetched = await client.channels.fetch(channelId);
+        if (fetched?.isTextBased()) channel = fetched as TextChannel;
+      } catch {
+        // channel fetch failed — fall through
+      }
+      if (!channel) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: "Discord channel not available. Please answer in the Pi TUI directly.",
+            },
+          ],
+          details: { answers: [], cancelled: true, error: "no_ui" },
+        };
+      }
+
+      interface Answer {
+        questionIndex: number;
+        question: string;
+        kind: "option" | "custom" | "chat" | "multi";
+        answer: string | null;
+        selected?: string[];
+        notes?: string;
+        preview?: string;
+      }
+
+      const answers: Answer[] = [];
+
+      for (let qi = 0; qi < params.questions.length; qi++) {
+        const q = params.questions[qi];
+
+        // Format question for Discord
+        const lines: string[] = [];
+        lines.push(`## ${q.header}: ${q.question}`);
+        lines.push("");
+
+        if (q.multiSelect) {
+          lines.push("*(Multi-select — reply with numbers/labels separated by commas)*");
+          lines.push("");
+        }
+
+        for (let oi = 0; oi < q.options.length; oi++) {
+          const opt = q.options[oi];
+          lines.push(`${oi + 1}. **${opt.label}** — ${opt.description}`);
+          if (opt.preview) {
+            lines.push(`\`\`\`\n${opt.preview}\n\`\`\``);
+          }
+        }
+
+        lines.push("");
+        if (q.multiSelect) {
+          lines.push("> Reply with numbers/labels (e.g. \"1,3\") or type \"chat\" to skip.");
+        } else {
+          lines.push("> Reply with the number or label, type a custom answer, or type \"chat\" to skip.");
+        }
+
+        // Send the question
+        try {
+          await channel.send(lines.join("\n"));
+        } catch {
+          return {
+            content: [{ type: "text", text: "Failed to send question to Discord." }],
+            details: { answers: [], cancelled: true, error: "no_ui" },
+          };
+        }
+
+        // Wait for answer
+        questionChannelId = channelId;
+        let answerText: string;
+        try {
+          answerText = await new Promise<string>((resolve, reject) => {
+            questionResolver = resolve;
+            questionRejecter = reject;
+
+            questionTimeout = setTimeout(() => {
+              clearQuestionState();
+              reject(new Error("Question timed out — no response in 5 minutes"));
+            }, 300_000);
+
+            const onAbort = () => {
+              clearQuestionState();
+              reject(new Error("Session shut down while waiting for question answer"));
+            };
+            if (signal) {
+              signal.addEventListener("abort", onAbort, { once: true });
+            }
+          });
+        } catch (err: any) {
+          clearQuestionState();
+          return {
+            content: [{ type: "text", text: `Question cancelled: ${err.message}` }],
+            details: { answers, cancelled: true },
+          };
+        }
+        clearQuestionState();
+
+        const trimmed = answerText.trim();
+
+        // Check for "chat" escape
+        if (trimmed.toLowerCase() === "chat" || trimmed.toLowerCase() === "/chat") {
+          answers.push({
+            questionIndex: qi,
+            question: q.question,
+            kind: "chat",
+            answer: null,
+          });
+          continue;
+        }
+
+        // Parse answer
+        if (q.multiSelect) {
+          // Multi-select: try to parse numbers/labels
+          const parts = trimmed.split(/[,\s]+/).filter(Boolean);
+          const selected: string[] = [];
+          for (const part of parts) {
+            const num = parseInt(part, 10);
+            if (!isNaN(num) && num >= 1 && num <= q.options.length) {
+              selected.push(q.options[num - 1].label);
+            } else {
+              // Try label match
+              const match = q.options.find(
+                (o: any) => o.label.toLowerCase() === part.toLowerCase(),
+              );
+              if (match) {
+                if (!selected.includes(match.label)) selected.push(match.label);
+              }
+            }
+          }
+
+          if (selected.length > 0) {
+            answers.push({
+              questionIndex: qi,
+              question: q.question,
+              kind: "multi",
+              answer: selected.join(", "),
+              selected,
+            });
+          } else {
+            // No match — treat as custom
+            answers.push({
+              questionIndex: qi,
+              question: q.question,
+              kind: "custom",
+              answer: trimmed,
+            });
+          }
+        } else {
+          // Single-select: try number first, then label match, then custom
+          const num = parseInt(trimmed, 10);
+          if (!isNaN(num) && num >= 1 && num <= q.options.length) {
+            const opt = q.options[num - 1];
+            answers.push({
+              questionIndex: qi,
+              question: q.question,
+              kind: "option",
+              answer: opt.label,
+              preview: opt.preview,
+            });
+          } else {
+            const match = q.options.find(
+              (o: any) => o.label.toLowerCase() === trimmed.toLowerCase(),
+            );
+            if (match) {
+              answers.push({
+                questionIndex: qi,
+                question: q.question,
+                kind: "option",
+                answer: match.label,
+                preview: match.preview,
+              });
+            } else {
+              // Custom answer
+              answers.push({
+                questionIndex: qi,
+                question: q.question,
+                kind: "custom",
+                answer: trimmed,
+              });
+            }
+          }
+        }
+      }
+
+      const summary = answers
+        .map((a) => {
+          if (a.kind === "chat") return `Q${a.questionIndex + 1}: [chat]`;
+          if (a.kind === "multi") return `Q${a.questionIndex + 1}: ${a.selected?.join(", ")}`;
+          return `Q${a.questionIndex + 1}: ${a.answer}`;
+        })
+        .join("; ");
+
+      return {
+        content: [{ type: "text", text: `User answers: ${summary}` }],
+        details: { answers, cancelled: false },
+      };
+    },
+  });
 
   // ── Command ───────────────────────────────────────────────────────────────
 
