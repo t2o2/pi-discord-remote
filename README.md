@@ -66,6 +66,17 @@ The extension loads silently on Pi startup — no channel is created until you e
 - **Tool calls** — each tool invocation is labeled (🔧 bash, 📄 read, ✏️ edit, etc.) with a detail line; if `toolResponses` is on, results follow as ↩️/❌ code blocks
 - **`/pi-discord-remote stop`** (or Pi exit) — channel is deleted, bot disconnects
 
+### Optional image skill tool
+
+Image forwarding is **not automatic** in `pi-discord-remote`.
+
+If you want to send an image, use the explicit `discord_send_image` tool (opt-in):
+- source by local `path`
+- or source by `url`
+- or source by `base64` (+ optional `mediaType`)
+
+Exactly one source must be provided per call. This keeps core remote control text-first while allowing image sends only when intentionally requested.
+
 ### `ask_user_question` → Discord
 
 Pi's TUI-only `ask_user_question` dialog (from `@juicesharp/rpiv-ask-user-question`) is invisible over Discord remote. When Discord is connected, pi-discord-remote:

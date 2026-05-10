@@ -150,45 +150,54 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
-  async function sendImageToActiveChannel(
-    source: { type: "base64"; media_type: string; data: string } | { type: "url"; url: string },
-  ): Promise<void> {
-    if (!client || !pendingReplyChannelId) return;
+  async function sendAttachmentToActiveChannel(params: {
+    path?: string;
+    url?: string;
+    base64?: string;
+    mediaType?: string;
+    filename?: string;
+    caption?: string;
+  }): Promise<{ ok: boolean; sentAs?: string; error?: string }> {
+    if (!client || !pendingReplyChannelId) {
+      return { ok: false, error: "no_active_channel" };
+    }
+
     try {
       const channel = (await client.channels.fetch(pendingReplyChannelId)) as TextChannel | null;
-      if (!channel?.isTextBased()) return;
-      if (source.type === "base64") {
-        const ext = (source.media_type ?? "image/png").split("/")[1] ?? "png";
-        const buffer = Buffer.from(source.data, "base64");
-        await (channel as TextChannel).send({ files: [{ attachment: buffer, name: `image.${ext}` }] });
-      } else if (source.type === "url") {
-        await (channel as TextChannel).send({ files: [{ attachment: source.url }] });
+      if (!channel?.isTextBased()) return { ok: false, error: "channel_unavailable" };
+
+      const content = params.caption?.trim() || undefined;
+
+      if (params.path) {
+        const filePath = params.path.trim();
+        if (!existsSync(filePath)) return { ok: false, error: `file_not_found:${filePath}` };
+        const buffer = await readFile(filePath);
+        const name = params.filename?.trim() || basename(filePath);
+        await channel.send({ content, files: [{ attachment: buffer, name }] });
+        return { ok: true, sentAs: "path" };
       }
-    } catch (err) {
-      console.error("[pi-discord-remote] Failed to send image:", err);
-    }
-  }
 
-  /** Upload a file from disk to the active Discord channel. */
-  async function sendFileToActiveChannel(filePath: string): Promise<void> {
-    if (!client || !pendingReplyChannelId) return;
-    try {
-      const channel = (await client.channels.fetch(pendingReplyChannelId)) as TextChannel | null;
-      if (!channel?.isTextBased()) return;
-      const buffer = await readFile(filePath);
-      const filename = basename(filePath);
-      await (channel as TextChannel).send({ files: [{ attachment: buffer, name: filename }] });
-    } catch (err) {
-      console.error("[pi-discord-remote] Failed to send file:", err);
-    }
-  }
+      if (params.url) {
+        await channel.send({
+          content,
+          files: [{ attachment: params.url.trim(), name: params.filename?.trim() || "image" }],
+        });
+        return { ok: true, sentAs: "url" };
+      }
 
-  /** Collect direct image sources from a content block array (assistant messages only). */
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  function extractImages(content: any[]): Array<{ type: "base64"; media_type: string; data: string } | { type: "url"; url: string }> {
-    return content
-      .filter((block) => block.type === "image" && block.source)
-      .map((block) => block.source);
+      if (params.base64) {
+        const mediaType = params.mediaType?.trim() || "image/png";
+        const ext = mediaType.split("/")[1] ?? "png";
+        const buffer = Buffer.from(params.base64.trim(), "base64");
+        const name = params.filename?.trim() || `image.${ext}`;
+        await channel.send({ content, files: [{ attachment: buffer, name }] });
+        return { ok: true, sentAs: "base64" };
+      }
+
+      return { ok: false, error: "missing_source" };
+    } catch (err: any) {
+      return { ok: false, error: err?.message ?? "send_failed" };
+    }
   }
 
   // ── Tool emoji / detail ───────────────────────────────────────────────────
@@ -227,77 +236,8 @@ export default function (pi: ExtensionAPI) {
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   pi.on("tool_result", async (event: any) => {
-    console.log("[pi-discord-remote] tool_result event keys:", Object.keys(event));
-    console.log("[pi-discord-remote] tool_result toolName:", event.toolName);
-    console.log("[pi-discord-remote] tool_result pendingReplyChannelId:", pendingReplyChannelId);
-    console.log("[pi-discord-remote] tool_result has details:", !!event.details);
-    if (event.details) {
-      console.log("[pi-discord-remote] tool_result details keys:", Object.keys(event.details));
-      console.log("[pi-discord-remote] tool_result details.artifacts:", JSON.stringify(event.details.artifacts?.slice(0, 3)));
-    }
-
     if (!pendingReplyChannelId) {
-      console.log("[pi-discord-remote] tool_result SKIPPED — no pendingReplyChannelId");
       return;
-    }
-
-    // Always forward embedded image content blocks — not gated by toolResponses
-    const images = event.content?.filter((c: any) => c.type === "image") ?? [];
-    console.log("[pi-discord-remote] tool_result embedded images in content:", images.length);
-    for (const img of images) {
-      if (img.source) {
-        console.log("[pi-discord-remote] Forwarding embedded image with source type:", img.source.type);
-        await sendImageToActiveChannel(img.source);
-      }
-    }
-
-    // Forward agent_browser file artifacts (screenshots, pdfs, downloads)
-    if (event.toolName === "agent_browser") {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const artifacts: any[] = event.details?.artifacts ?? [];
-      console.log("[pi-discord-remote] agent_browser artifacts count:", artifacts.length);
-      const forwarded = new Set<string>();
-
-      for (const artifact of artifacts) {
-        console.log("[pi-discord-remote] artifact keys:", Object.keys(artifact));
-        console.log("[pi-discord-remote] artifact.kind:", artifact.kind);
-        console.log("[pi-discord-remote] artifact:", JSON.stringify(artifact));
-        // FileArtifactMetadata uses 'kind' (not 'type'): "image", "download", "pdf", etc.
-        if (artifact.kind === "image") {
-          const filePath = artifact.absolutePath ?? artifact.path;
-          console.log("[pi-discord-remote] image filePath:", filePath);
-          console.log("[pi-discord-remote] existsSync:", filePath ? existsSync(filePath) : "N/A");
-          if (filePath && !forwarded.has(filePath) && existsSync(filePath)) {
-            console.log("[pi-discord-remote] Forwarding image file to Discord:", filePath);
-            await sendFileToActiveChannel(filePath);
-            forwarded.add(filePath);
-          }
-        }
-      }
-
-      // Fallback: parse text for "Artifact type: image" + "Absolute path: <path>"
-      if (forwarded.size === 0) {
-        console.log("[pi-discord-remote] No artifacts forwarded via details, trying text fallback");
-        const textContent = (event.content ?? [])
-          .filter((c: any) => c.type === "text")
-          .map((c: any) => String(c.text ?? ""))
-          .join("\n");
-        console.log("[pi-discord-remote] textContent (first 500 chars):", textContent.slice(0, 500));
-        const matches = [...textContent.matchAll(/Artifact type: image[\s\S]*?Absolute path: ([^\n]+)/g)];
-        console.log("[pi-discord-remote] text regex matches:", matches.length);
-        for (const match of matches) {
-          const filePath = match[1].trim();
-          console.log("[pi-discord-remote] text fallback filePath:", filePath);
-          console.log("[pi-discord-remote] text fallback existsSync:", existsSync(filePath));
-          if (filePath && !forwarded.has(filePath) && existsSync(filePath)) {
-            console.log("[pi-discord-remote] Forwarding image file (text fallback) to Discord:", filePath);
-            await sendFileToActiveChannel(filePath);
-            forwarded.add(filePath);
-          }
-        }
-      } else {
-        console.log("[pi-discord-remote] Forwarded", forwarded.size, "images via artifacts");
-      }
     }
 
     // Only send text summaries if toolResponses is enabled
@@ -356,14 +296,6 @@ export default function (pi: ExtensionAPI) {
         .join("");
       if (text.trim()) collectedAssistantText.push(text);
     }
-
-    // Forward any images from any role (assistant text, tool results, etc.)
-    const images = extractImages(content);
-    for (const src of images) {
-      await sendImageToActiveChannel(src);
-    }
-
-
   });
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -815,6 +747,46 @@ export default function (pi: ExtensionAPI) {
       return {
         content: [{ type: "text", text: `User answers: ${summary}` }],
         details: { answers, cancelled: false },
+      };
+    },
+  });
+
+  // ── Tool: discord_send_image (opt-in; no automatic forwarding) ──────────
+  pi.registerTool({
+    name: "discord_send_image",
+    label: "Send Image To Discord",
+    description:
+      "Send a single image to the active Discord session channel. " +
+      "Use only when the user explicitly asks to send an image. " +
+      "Provide exactly one source: local file path, URL, or base64.",
+    parameters: Type.Object({
+      path: Type.Optional(Type.String()),
+      url: Type.Optional(Type.String()),
+      base64: Type.Optional(Type.String()),
+      mediaType: Type.Optional(Type.String()),
+      filename: Type.Optional(Type.String()),
+      caption: Type.Optional(Type.String()),
+    }),
+    async execute(_toolCallId, params) {
+      const provided = [params.path, params.url, params.base64].filter(Boolean).length;
+      if (provided !== 1) {
+        return {
+          content: [{ type: "text", text: "Provide exactly one image source: path, url, or base64." }],
+          details: { ok: false, error: "invalid_source_count" },
+        };
+      }
+
+      const result = await sendAttachmentToActiveChannel(params);
+      if (!result.ok) {
+        return {
+          content: [{ type: "text", text: `Failed to send image to Discord: ${result.error}` }],
+          details: result,
+        };
+      }
+
+      return {
+        content: [{ type: "text", text: `Image sent to Discord (${result.sentAs}).` }],
+        details: result,
       };
     },
   });
