@@ -59,6 +59,8 @@ Edit config with `/pi-discord-remote open-config`.
 
 ## How it works
 
+The extension loads silently on Pi startup — no channel is created until you explicitly run the command.
+
 - **`/pi-discord-remote start`** — bot logs in, creates a text channel named `<project>-<mon><dd>-<HHMM>`, and starts listening there only
 - **Incoming message** — injected as a user prompt into the active Pi session; bot reacts ⏳ while Pi works, then posts the full response back
 - **Tool calls** — each tool invocation is labeled (🔧 bash, 📄 read, ✏️ edit, etc.) with a detail line; if `toolResponses` is on, results follow as ↩️/❌ code blocks
