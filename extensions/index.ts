@@ -169,6 +169,20 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
+  /** Upload a file from disk to the active Discord channel. */
+  async function sendFileToActiveChannel(filePath: string): Promise<void> {
+    if (!client || !pendingReplyChannelId) return;
+    try {
+      const channel = (await client.channels.fetch(pendingReplyChannelId)) as TextChannel | null;
+      if (!channel?.isTextBased()) return;
+      const buffer = await readFile(filePath);
+      const filename = basename(filePath);
+      await (channel as TextChannel).send({ files: [{ attachment: buffer, name: filename }] });
+    } catch (err) {
+      console.error("[pi-discord-remote] Failed to send file:", err);
+    }
+  }
+
   /** Collect direct image sources from a content block array (assistant messages only). */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   function extractImages(content: any[]): Array<{ type: "base64"; media_type: string; data: string } | { type: "url"; url: string }> {
@@ -213,7 +227,81 @@ export default function (pi: ExtensionAPI) {
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   pi.on("tool_result", async (event: any) => {
-    if (!pendingReplyChannelId || !activeConfig?.toolResponses) return;
+    console.log("[pi-discord-remote] tool_result event keys:", Object.keys(event));
+    console.log("[pi-discord-remote] tool_result toolName:", event.toolName);
+    console.log("[pi-discord-remote] tool_result pendingReplyChannelId:", pendingReplyChannelId);
+    console.log("[pi-discord-remote] tool_result has details:", !!event.details);
+    if (event.details) {
+      console.log("[pi-discord-remote] tool_result details keys:", Object.keys(event.details));
+      console.log("[pi-discord-remote] tool_result details.artifacts:", JSON.stringify(event.details.artifacts?.slice(0, 3)));
+    }
+
+    if (!pendingReplyChannelId) {
+      console.log("[pi-discord-remote] tool_result SKIPPED — no pendingReplyChannelId");
+      return;
+    }
+
+    // Always forward embedded image content blocks — not gated by toolResponses
+    const images = event.content?.filter((c: any) => c.type === "image") ?? [];
+    console.log("[pi-discord-remote] tool_result embedded images in content:", images.length);
+    for (const img of images) {
+      if (img.source) {
+        console.log("[pi-discord-remote] Forwarding embedded image with source type:", img.source.type);
+        await sendImageToActiveChannel(img.source);
+      }
+    }
+
+    // Forward agent_browser file artifacts (screenshots, pdfs, downloads)
+    if (event.toolName === "agent_browser") {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const artifacts: any[] = event.details?.artifacts ?? [];
+      console.log("[pi-discord-remote] agent_browser artifacts count:", artifacts.length);
+      const forwarded = new Set<string>();
+
+      for (const artifact of artifacts) {
+        console.log("[pi-discord-remote] artifact keys:", Object.keys(artifact));
+        console.log("[pi-discord-remote] artifact.kind:", artifact.kind);
+        console.log("[pi-discord-remote] artifact:", JSON.stringify(artifact));
+        // FileArtifactMetadata uses 'kind' (not 'type'): "image", "download", "pdf", etc.
+        if (artifact.kind === "image") {
+          const filePath = artifact.absolutePath ?? artifact.path;
+          console.log("[pi-discord-remote] image filePath:", filePath);
+          console.log("[pi-discord-remote] existsSync:", filePath ? existsSync(filePath) : "N/A");
+          if (filePath && !forwarded.has(filePath) && existsSync(filePath)) {
+            console.log("[pi-discord-remote] Forwarding image file to Discord:", filePath);
+            await sendFileToActiveChannel(filePath);
+            forwarded.add(filePath);
+          }
+        }
+      }
+
+      // Fallback: parse text for "Artifact type: image" + "Absolute path: <path>"
+      if (forwarded.size === 0) {
+        console.log("[pi-discord-remote] No artifacts forwarded via details, trying text fallback");
+        const textContent = (event.content ?? [])
+          .filter((c: any) => c.type === "text")
+          .map((c: any) => String(c.text ?? ""))
+          .join("\n");
+        console.log("[pi-discord-remote] textContent (first 500 chars):", textContent.slice(0, 500));
+        const matches = [...textContent.matchAll(/Artifact type: image[\s\S]*?Absolute path: ([^\n]+)/g)];
+        console.log("[pi-discord-remote] text regex matches:", matches.length);
+        for (const match of matches) {
+          const filePath = match[1].trim();
+          console.log("[pi-discord-remote] text fallback filePath:", filePath);
+          console.log("[pi-discord-remote] text fallback existsSync:", existsSync(filePath));
+          if (filePath && !forwarded.has(filePath) && existsSync(filePath)) {
+            console.log("[pi-discord-remote] Forwarding image file (text fallback) to Discord:", filePath);
+            await sendFileToActiveChannel(filePath);
+            forwarded.add(filePath);
+          }
+        }
+      } else {
+        console.log("[pi-discord-remote] Forwarded", forwarded.size, "images via artifacts");
+      }
+    }
+
+    // Only send text summaries if toolResponses is enabled
+    if (!activeConfig?.toolResponses) return;
 
     // Build a label like "↩️ bash: ..." or "↩️ read: ..."
     const emoji = event.isError ? "❌" : "↩️";
@@ -223,20 +311,11 @@ export default function (pi: ExtensionAPI) {
       .join("")
       .slice(0, 300) ?? "";
 
-    // Also extract images from tool results
-    const images = event.content?.filter((c: any) => c.type === "image") ?? [];
-    for (const img of images) {
-      if (img.source) {
-        await sendImageToActiveChannel(img.source);
-      }
-    }
-
     // Send a compact summary line for each tool result
     const label = `${emoji} _${event.toolName}_`;
     if (detailLabel) {
       const truncated = detailLabel.length > 400 ? detailLabel.slice(0, 400) + "…" : detailLabel;
-      await sendToActiveChannel(`${label}:
-\`\`\`\n${truncated}\n\`\`\``);
+      await sendToActiveChannel(`${label}:\n\`\`\`\n${truncated}\n\`\`\``);
     } else {
       await sendToActiveChannel(label);
     }
@@ -340,12 +419,14 @@ export default function (pi: ExtensionAPI) {
 
   // ── Session cleanup ───────────────────────────────────────────────────────
 
-  pi.on("session_shutdown", async () => {
+  pi.on("session_shutdown", async (event: any) => {
     // Reject any pending question so tool execution doesn't hang
     if (questionRejecter) {
       questionRejecter(new Error("Session shut down"));
     }
     clearQuestionState();
+    // Don't destroy Discord client on reload — just re-register handlers
+    if (event?.reason === "reload") return;
     if (client) {
       await deleteSessionChannel((_k, _v) => {});
       await client.destroy().catch(() => {});
@@ -353,6 +434,8 @@ export default function (pi: ExtensionAPI) {
       activeConfig = null;
     }
   });
+
+  // Auto-connect removed — user must run /pi-discord-remote start explicitly.
 
   // ── Connect + channel-create helper ──────────────────────────────────────
 
