@@ -120,6 +120,7 @@ export default function (pi: ExtensionAPI) {
   let pendingReplyUserId: string | null = null;
   let collectedAssistantText: string[] = [];
   let postedThinkingNotice = false;
+  let lastImageArtifactPath: string | null = null;
 
   // ── Question-answering state (for overriding ask_user_question) ────────
   let questionResolver: ((answer: string) => void) | null = null;
@@ -150,11 +151,79 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
-  function getTargetChannelId(): string | null {
-    return pendingReplyChannelId ?? sessionChannelId ?? activeConfig?.channelId ?? null;
+  function getTargetChannelId(overrideChannelId?: string): string | null {
+    const override = overrideChannelId?.trim();
+    return override || sessionChannelId || activeConfig?.channelId || pendingReplyChannelId || null;
+  }
+
+  function isAbortLikeError(err: any): boolean {
+    const msg = String(err?.message ?? "").toLowerCase();
+    return msg.includes("aborted") || msg.includes("abort");
+  }
+
+  function sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  async function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const timeout = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => reject(new Error(`timeout:${label}:${ms}ms`)), ms);
+    });
+    try {
+      return await Promise.race([promise, timeout]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  async function sendMessageViaDiscordRest(params: {
+    channelId: string;
+    token: string;
+    content?: string;
+    filename?: string;
+    mediaType?: string;
+    bytes?: Buffer;
+  }): Promise<{ ok: boolean; error?: string }> {
+    const url = `https://discord.com/api/v10/channels/${params.channelId}/messages`;
+    const form = new FormData();
+
+    if (params.bytes) {
+      const fileName = params.filename ?? "image.png";
+      const type = params.mediaType ?? "image/png";
+      const payload = {
+        content: params.content ?? "",
+        attachments: [{ id: 0, filename: fileName }],
+      };
+      form.append("payload_json", JSON.stringify(payload));
+      form.append("files[0]", new Blob([params.bytes], { type }), fileName);
+    } else {
+      form.append("content", params.content ?? "");
+    }
+
+    const resp = await withTimeout(
+      fetch(url, {
+        method: "POST",
+        headers: {
+          Authorization: `Bot ${params.token}`,
+        },
+        body: form,
+      }),
+      20_000,
+      "discord_rest_send",
+    );
+
+    if (!resp.ok) {
+      const body = await resp.text().catch(() => "");
+      if (resp.status === 404) return { ok: false, error: `unknown_channel:${params.channelId}` };
+      return { ok: false, error: `discord_http_${resp.status}:${body.slice(0, 200)}` };
+    }
+
+    return { ok: true };
   }
 
   async function sendAttachmentToActiveChannel(params: {
+    channelId?: string;
     path?: string;
     url?: string;
     base64?: string;
@@ -162,31 +231,54 @@ export default function (pi: ExtensionAPI) {
     filename?: string;
     caption?: string;
   }): Promise<{ ok: boolean; sentAs?: string; error?: string }> {
-    const targetChannelId = getTargetChannelId();
-    if (!client || !targetChannelId) {
+    const targetChannelId = getTargetChannelId(params.channelId);
+    if (!client?.isReady()) {
+      return { ok: false, error: "discord_not_connected" };
+    }
+    if (!targetChannelId) {
       return { ok: false, error: "no_active_channel" };
     }
 
-    try {
-      const channel = (await client.channels.fetch(targetChannelId)) as TextChannel | null;
+    const sendOnce = async (): Promise<{ ok: boolean; sentAs?: string; error?: string }> => {
+      const channel = (await withTimeout(
+        client!.channels.fetch(targetChannelId),
+        15_000,
+        "fetch_channel",
+      )) as TextChannel | null;
       if (!channel?.isTextBased()) return { ok: false, error: "channel_unavailable" };
+      if (activeConfig?.guildId && "guildId" in channel && channel.guildId !== activeConfig.guildId) {
+        return { ok: false, error: `wrong_guild:${targetChannelId}` };
+      }
 
       const content = params.caption?.trim() || undefined;
+      const token = activeConfig?.token?.trim();
+      if (!token) return { ok: false, error: "missing_bot_token" };
 
       if (params.path) {
         const filePath = params.path.trim();
         if (!existsSync(filePath)) return { ok: false, error: `file_not_found:${filePath}` };
-        const buffer = await readFile(filePath);
+        const buffer = await withTimeout(readFile(filePath), 5_000, "read_file");
         const name = params.filename?.trim() || basename(filePath);
-        await channel.send({ content, files: [{ attachment: buffer, name }] });
+        const sent = await sendMessageViaDiscordRest({
+          channelId: targetChannelId,
+          token,
+          content,
+          filename: name,
+          mediaType: "image/png",
+          bytes: buffer,
+        });
+        if (!sent.ok) return { ok: false, error: sent.error ?? "send_path_failed" };
         return { ok: true, sentAs: "path" };
       }
 
       if (params.url) {
-        await channel.send({
-          content,
-          files: [{ attachment: params.url.trim(), name: params.filename?.trim() || "image" }],
+        const body = content ? `${content}\n${params.url.trim()}` : params.url.trim();
+        const sent = await sendMessageViaDiscordRest({
+          channelId: targetChannelId,
+          token,
+          content: body,
         });
+        if (!sent.ok) return { ok: false, error: sent.error ?? "send_url_failed" };
         return { ok: true, sentAs: "url" };
       }
 
@@ -195,13 +287,42 @@ export default function (pi: ExtensionAPI) {
         const ext = mediaType.split("/")[1] ?? "png";
         const buffer = Buffer.from(params.base64.trim(), "base64");
         const name = params.filename?.trim() || `image.${ext}`;
-        await channel.send({ content, files: [{ attachment: buffer, name }] });
+        const sent = await sendMessageViaDiscordRest({
+          channelId: targetChannelId,
+          token,
+          content,
+          filename: name,
+          mediaType,
+          bytes: buffer,
+        });
+        if (!sent.ok) return { ok: false, error: sent.error ?? "send_base64_failed" };
         return { ok: true, sentAs: "base64" };
       }
 
       return { ok: false, error: "missing_source" };
+    };
+
+    const toError = (err: any): string => {
+      const msg = String(err?.message ?? "send_failed");
+      const code = String(err?.code ?? "");
+      if (code === "10003" || msg.toLowerCase().includes("unknown channel")) {
+        return `unknown_channel:${targetChannelId}`;
+      }
+      return msg;
+    };
+
+    try {
+      return await sendOnce();
     } catch (err: any) {
-      return { ok: false, error: err?.message ?? "send_failed" };
+      if (isAbortLikeError(err)) {
+        try {
+          await sleep(300);
+          return await sendOnce();
+        } catch (retryErr: any) {
+          return { ok: false, error: toError(retryErr) };
+        }
+      }
+      return { ok: false, error: toError(err) };
     }
   }
 
@@ -241,6 +362,20 @@ export default function (pi: ExtensionAPI) {
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   pi.on("tool_result", async (event: any) => {
+    // Capture latest browser image artifact path for follow-up discord_send_image calls.
+    if (event.toolName === "agent_browser") {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const artifacts: any[] = event.details?.artifacts ?? [];
+      for (const artifact of artifacts) {
+        if (artifact?.kind === "image") {
+          const candidate = artifact.absolutePath ?? artifact.path;
+          if (candidate && existsSync(candidate)) {
+            lastImageArtifactPath = candidate;
+          }
+        }
+      }
+    }
+
     if (!pendingReplyChannelId) {
       return;
     }
@@ -417,6 +552,7 @@ export default function (pi: ExtensionAPI) {
         sessionChannelName = channelName;
         // Update the in-memory config so messageCreate checks the right channel
         activeConfig = { ...cfg, channelId: listeningChannelId };
+        await saveConfig(activeConfig);
 
         const label = `🔌 Discord: #${channelName}`;
         notifyFn(`Connected as ${c.user.tag} → #${channelName}`, "success");
@@ -499,10 +635,15 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("before_agent_start", async (event, _ctx) => {
     if (!client?.isReady()) return;
+    const activeChannelId = sessionChannelId ?? activeConfig?.channelId;
     return {
       systemPrompt:
         event.systemPrompt +
         "\n\n" +
+        (activeChannelId
+          ? `Active Discord session channel ID: ${activeChannelId}. ` +
+            "When using discord_send_image, pass this as channelId.\n\n"
+          : "") +
         "When you need to ask the user a clarifying question, use the " +
         "discord_ask_user_question tool instead of ask_user_question. " +
         "The Discord version sends questions to the user's Discord channel. " +
@@ -765,6 +906,7 @@ export default function (pi: ExtensionAPI) {
       "Use only when the user explicitly asks to send an image. " +
       "Provide exactly one source: local file path, URL, or base64.",
     parameters: Type.Object({
+      channelId: Type.Optional(Type.String()),
       path: Type.Optional(Type.String()),
       url: Type.Optional(Type.String()),
       base64: Type.Optional(Type.String()),
@@ -773,7 +915,13 @@ export default function (pi: ExtensionAPI) {
       caption: Type.Optional(Type.String()),
     }),
     async execute(_toolCallId, params) {
-      const provided = [params.path, params.url, params.base64].filter(Boolean).length;
+      const normalized = { ...params };
+      let provided = [normalized.path, normalized.url, normalized.base64].filter(Boolean).length;
+      if (provided === 0 && lastImageArtifactPath) {
+        normalized.path = lastImageArtifactPath;
+        provided = 1;
+      }
+
       if (provided !== 1) {
         return {
           content: [{ type: "text", text: "Provide exactly one image source: path, url, or base64." }],
@@ -781,7 +929,17 @@ export default function (pi: ExtensionAPI) {
         };
       }
 
-      const result = await sendAttachmentToActiveChannel(params);
+      let result: { ok: boolean; sentAs?: string; error?: string };
+      try {
+        result = await withTimeout(
+          sendAttachmentToActiveChannel(normalized),
+          30_000,
+          "discord_send_image_total",
+        );
+      } catch (err: any) {
+        const msg = String(err?.message ?? "send_failed");
+        result = { ok: false, error: msg };
+      }
       if (!result.ok) {
         return {
           content: [{ type: "text", text: `Failed to send image to Discord: ${result.error}` }],
@@ -888,6 +1046,7 @@ export default function (pi: ExtensionAPI) {
             ctx.ui.notify(
               `✅ Connected as ${client.user.tag}\n` +
                 `   Channel: #${sessionChannelName ?? activeConfig?.channelId}\n` +
+                `   Channel ID: ${sessionChannelId ?? activeConfig?.channelId ?? "(unknown)"}\n` +
                 `   Allow-list: ${activeConfig?.allowedUserIds?.join(", ") || "everyone"}`,
               "info",
             );

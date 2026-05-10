@@ -24,7 +24,7 @@
     ]
   },
   "dependencies": {
-    "discord.js": "^14.0.0"
+    "discord.js": "^14.26.4"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*"
