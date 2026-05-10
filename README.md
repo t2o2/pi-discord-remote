@@ -71,11 +71,16 @@ The extension loads silently on Pi startup — no channel is created until you e
 Image forwarding is **not automatic** in `pi-discord-remote`.
 
 If you want to send an image, use the explicit `discord_send_image` tool (opt-in):
+- optional `channelId` (recommended for deterministic targeting)
 - source by local `path`
 - or source by `url`
 - or source by `base64` (+ optional `mediaType`)
 
-Exactly one source must be provided per call. This keeps core remote control text-first while allowing image sends only when intentionally requested.
+Exactly one source should be provided per call. If omitted, the tool falls back to the latest `agent_browser` image artifact path.
+
+`/pi-discord-remote status` now shows the active **Channel ID** so you can pass it directly to `discord_send_image`.
+
+The tool returns explicit send errors (for example `unknown_channel:<id>` or timeout/HTTP errors) instead of silently forwarding images.
 
 ### `ask_user_question` → Discord
 
