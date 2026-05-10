@@ -150,6 +150,10 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
+  function getTargetChannelId(): string | null {
+    return pendingReplyChannelId ?? sessionChannelId ?? activeConfig?.channelId ?? null;
+  }
+
   async function sendAttachmentToActiveChannel(params: {
     path?: string;
     url?: string;
@@ -158,12 +162,13 @@ export default function (pi: ExtensionAPI) {
     filename?: string;
     caption?: string;
   }): Promise<{ ok: boolean; sentAs?: string; error?: string }> {
-    if (!client || !pendingReplyChannelId) {
+    const targetChannelId = getTargetChannelId();
+    if (!client || !targetChannelId) {
       return { ok: false, error: "no_active_channel" };
     }
 
     try {
-      const channel = (await client.channels.fetch(pendingReplyChannelId)) as TextChannel | null;
+      const channel = (await client.channels.fetch(targetChannelId)) as TextChannel | null;
       if (!channel?.isTextBased()) return { ok: false, error: "channel_unavailable" };
 
       const content = params.caption?.trim() || undefined;
