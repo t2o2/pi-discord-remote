@@ -152,32 +152,12 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
-  /** Extract plain text from a tool_result content block. */
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  function extractToolResultText(block: any): string {
-    if (typeof block.content === "string") return block.content;
-    if (Array.isArray(block.content)) {
-      return block.content
-        .filter((c: { type: string }) => c.type === "text")
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        .map((c: any) => c.text as string)
-        .join("\n");
-    }
-    return "";
-  }
-
-  /** Recursively collect all image sources from a content block array. */
+  /** Collect direct image sources from a content block array (assistant messages only). */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   function extractImages(content: any[]): Array<{ type: "base64"; media_type: string; data: string } | { type: "url"; url: string }> {
-    const images: Array<{ type: "base64"; media_type: string; data: string } | { type: "url"; url: string }> = [];
-    for (const block of content) {
-      if (block.type === "image" && block.source) {
-        images.push(block.source);
-      } else if (block.type === "tool_result" && Array.isArray(block.content)) {
-        images.push(...extractImages(block.content));
-      }
-    }
-    return images;
+    return content
+      .filter((block) => block.type === "image" && block.source)
+      .map((block) => block.source);
   }
 
   // ── Tool emoji / detail ───────────────────────────────────────────────────
@@ -212,6 +192,37 @@ export default function (pi: ExtensionAPI) {
     agentBusy = true;
     collectedAssistantText = [];
     postedThinkingNotice = false;
+  });
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  pi.on("tool_result", async (event: any) => {
+    if (!pendingReplyChannelId || !activeConfig?.toolResponses) return;
+
+    // Build a label like "↩️ bash: ..." or "↩️ read: ..."
+    const emoji = event.isError ? "❌" : "↩️";
+    const detailLabel = event.content
+      ?.filter((c: any) => c.type === "text")
+      .map((c: any) => String(c.text ?? "").trim())
+      .join("")
+      .slice(0, 300) ?? "";
+
+    // Also extract images from tool results
+    const images = event.content?.filter((c: any) => c.type === "image") ?? [];
+    for (const img of images) {
+      if (img.source) {
+        await sendImageToActiveChannel(img.source);
+      }
+    }
+
+    // Send a compact summary line for each tool result
+    const label = `${emoji} _${event.toolName}_`;
+    if (detailLabel) {
+      const truncated = detailLabel.length > 400 ? detailLabel.slice(0, 400) + "…" : detailLabel;
+      await sendToActiveChannel(`${label}:
+\`\`\`\n${truncated}\n\`\`\``);
+    } else {
+      await sendToActiveChannel(label);
+    }
   });
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -254,18 +265,7 @@ export default function (pi: ExtensionAPI) {
       await sendImageToActiveChannel(src);
     }
 
-    // Optionally send tool responses
-    if (event.message.role === "user" && activeConfig?.toolResponses) {
-      for (const block of content) {
-        if (block.type !== "tool_result") continue;
-        const resultText = extractToolResultText(block);
-        if (!resultText.trim()) continue;
-        const truncated = resultText.length > 500
-          ? resultText.slice(0, 500) + "\n…"
-          : resultText;
-        await sendToActiveChannel(`↩️ \`\`\`\n${truncated}\n\`\`\``);
-      }
-    }
+
   });
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
