@@ -1,6 +1,7 @@
 {
   "name": "pi-discord-remote",
-  "version": "0.1.10",
+  "version": "0.2.0",
+  "type": "module",
   "description": "Control your Pi coding-agent session from Discord — each session gets its own auto-created channel",
   "keywords": [
     "pi-package",
@@ -15,13 +16,23 @@
     "url": "https://github.com/t2o2/pi-discord-remote"
   },
   "homepage": "https://github.com/t2o2/pi-discord-remote#readme",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "files": [
-    "extensions/"
+    "dist/"
   ],
   "pi": {
     "extensions": [
-      "./extensions"
+      "./dist"
     ]
+  },
+  "scripts": {
+    "build": "tsc",
+    "prepublishOnly": "npm run build",
+    "check": "tsc --noEmit"
+  },
+  "engines": {
+    "node": ">=18.0.0"
   },
   "dependencies": {
     "discord.js": "^14.26.4"

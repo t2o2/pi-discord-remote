@@ -44,6 +44,16 @@ pi install npm:pi-discord-remote
 
 Config is stored at `~/.pi/agent/pi-discord-remote/config.json`.
 
+### Environment variables (alternative to config file)
+
+For CI or headless setups, you can skip `setup` entirely and set these env vars:
+
+| Variable | Description |
+|----------|-------------|
+| `DISCORD_TOKEN` | Bot token (overrides config file) |
+| `DISCORD_GUILD_ID` | Guild (server) ID |
+| `DISCORD_CATEGORY_ID` | Optional category ID |
+
 ## Config reference
 
 | Key | Type | Default | Description |

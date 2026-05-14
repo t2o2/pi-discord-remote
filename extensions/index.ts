@@ -28,92 +28,35 @@ import {
   type Message,
   type TextChannel,
 } from "discord.js";
-import { readFile, writeFile, mkdir } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
-import { join, basename } from "node:path";
-import { homedir } from "node:os";
+import { basename } from "node:path";
 
-// ─── Config ───────────────────────────────────────────────────────────────────
-
-const CONFIG_DIR = join(homedir(), ".pi", "agent", "pi-discord-remote");
-const CONFIG_FILE = join(CONFIG_DIR, "config.json");
-
-interface Config {
-  token: string;
-  /** Discord guild (server) ID — required for auto-channel creation */
-  guildId: string;
-  /** Optional category ID to put new channels under */
-  categoryId?: string;
-  /** Fallback channel ID when not creating a new channel (legacy) */
-  channelId?: string;
-  /** Optional allow-list of Discord user IDs. Empty = allow everyone. */
-  allowedUserIds?: string[];
-  /** React with emoji while processing (default: true) */
-  reactions?: boolean;
-  /** Also send tool responses (output/results) after each tool call (default: false) */
-  toolResponses?: boolean;
-}
-
-async function loadConfig(): Promise<Config | null> {
-  try {
-    return JSON.parse(await readFile(CONFIG_FILE, "utf-8")) as Config;
-  } catch {
-    return null;
-  }
-}
-
-async function saveConfig(cfg: Config): Promise<void> {
-  await mkdir(CONFIG_DIR, { recursive: true });
-  await writeFile(CONFIG_FILE, JSON.stringify(cfg, null, 2) + "\n");
-}
-
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-
-/** Generate a Discord-safe channel name from cwd + short date + time (HH-MM). */
-function makeChannelName(cwd: string): string {
-  const dir = basename(cwd) || "pi";
-  const now = new Date();
-  const month = now.toLocaleString("en-US", { month: "short" }).toLowerCase();
-  const day = String(now.getDate()).padStart(2, "0");
-  const hh = String(now.getHours()).padStart(2, "0");
-  const mm = String(now.getMinutes()).padStart(2, "0");
-  const raw = `${dir}-${month}${day}-${hh}${mm}`;
-  // Discord channel name rules: lowercase, 1-100 chars, only a-z 0-9 - _
-  return raw
-    .toLowerCase()
-    .replace(/[^a-z0-9\-_]/g, "-")
-    .replace(/-{2,}/g, "-")
-    .replace(/^-|-$/g, "")
-    .slice(0, 100);
-}
-
-/** Split a string into ≤maxLen chunks, preferring newline boundaries. */
-function splitMessage(text: string, maxLen = 1900): string[] {
-  if (text.length <= maxLen) return [text];
-  const chunks: string[] = [];
-  let remaining = text;
-  while (remaining.length > 0) {
-    if (remaining.length <= maxLen) {
-      chunks.push(remaining);
-      break;
-    }
-    let cut = remaining.lastIndexOf("\n", maxLen);
-    if (cut <= 0) cut = maxLen;
-    chunks.push(remaining.slice(0, cut));
-    remaining = remaining.slice(cut).replace(/^\n/, "");
-  }
-  return chunks;
-}
+import { loadConfig, saveConfig, CONFIG_FILE, defaultConfigTemplate } from "./config.js";
+import type { Config } from "./config.js";
+import {
+  makeChannelName,
+  splitMessage,
+  toolLabel,
+  isAbortLikeError,
+  sleep,
+  withTimeout,
+} from "./helpers.js";
 
 // ─── Extension ────────────────────────────────────────────────────────────────
 
 export default function (pi: ExtensionAPI) {
+  /** Mutable runtime state — never persisted to disk. */
+  interface RuntimeState {
+    /** The channel ID this session is listening on (created or fallback). */
+    activeChannelId: string | null;
+    /** Channel name at creation time (for display). */
+    sessionChannelName: string | null;
+  }
+
   let client: Client | null = null;
   let activeConfig: Config | null = null;
-  /** ID of the channel that was created for this session (so we can archive it). */
-  let sessionChannelId: string | null = null;
-  /** Channel name at creation time (for archive rename). */
-  let sessionChannelName: string | null = null;
+  const runtime: RuntimeState = { activeChannelId: null, sessionChannelName: null };
 
   let agentBusy = false;
   let pendingReplyChannelId: string | null = null;
@@ -153,28 +96,7 @@ export default function (pi: ExtensionAPI) {
 
   function getTargetChannelId(overrideChannelId?: string): string | null {
     const override = overrideChannelId?.trim();
-    return override || sessionChannelId || activeConfig?.channelId || pendingReplyChannelId || null;
-  }
-
-  function isAbortLikeError(err: any): boolean {
-    const msg = String(err?.message ?? "").toLowerCase();
-    return msg.includes("aborted") || msg.includes("abort");
-  }
-
-  function sleep(ms: number): Promise<void> {
-    return new Promise((resolve) => setTimeout(resolve, ms));
-  }
-
-  async function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    const timeout = new Promise<never>((_resolve, reject) => {
-      timer = setTimeout(() => reject(new Error(`timeout:${label}:${ms}ms`)), ms);
-    });
-    try {
-      return await Promise.race([promise, timeout]);
-    } finally {
-      if (timer) clearTimeout(timer);
-    }
+    return override || runtime.activeChannelId || activeConfig?.channelId || pendingReplyChannelId || null;
   }
 
   async function sendMessageViaDiscordRest(params: {
@@ -196,7 +118,7 @@ export default function (pi: ExtensionAPI) {
         attachments: [{ id: 0, filename: fileName }],
       };
       form.append("payload_json", JSON.stringify(payload));
-      form.append("files[0]", new Blob([params.bytes], { type }), fileName);
+      form.append("files[0]", new Blob([new Uint8Array(params.bytes)], { type }), fileName);
     } else {
       form.append("content", params.content ?? "");
     }
@@ -326,31 +248,6 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
-  // ── Tool emoji / detail ───────────────────────────────────────────────────
-
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  function toolLabel(toolName: string, args: any): string {
-    const emojis: Record<string, string> = {
-      bash: "🔧", read: "📄", edit: "✏️", write: "📝",
-      grep: "🔍", find: "🔎", ls: "📁",
-    };
-    const emoji = emojis[toolName] ?? "⚙️";
-    let detail = "";
-    if (toolName === "bash" && args?.command) {
-      const cmd = String(args.command).replace(/\n/g, " ").slice(0, 80);
-      detail = `: \`${cmd}${args.command.length > 80 ? "…" : ""}\``;
-    } else if (["read", "write"].includes(toolName) && args?.path) {
-      detail = `: \`${args.path}\``;
-    } else if (toolName === "edit" && args?.path) {
-      detail = `: \`${args.path}\``;
-    } else if (toolName === "grep" && args?.pattern) {
-      detail = `: \`${args.pattern}\`${args.path ? ` in \`${args.path}\`` : ""}`;
-    } else if (["find", "ls"].includes(toolName) && args?.path) {
-      detail = `: \`${args.path}\``;
-    }
-    return `${emoji} _${toolName}_${detail}`;
-  }
-
   // ── Collect assistant output ──────────────────────────────────────────────
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -358,6 +255,7 @@ export default function (pi: ExtensionAPI) {
     agentBusy = true;
     collectedAssistantText = [];
     postedThinkingNotice = false;
+    lastImageArtifactPath = null;
   });
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -477,15 +375,15 @@ export default function (pi: ExtensionAPI) {
   async function deleteSessionChannel(
     setStatusFn: (key: string, val: string | undefined) => void,
   ): Promise<void> {
-    if (!client || !sessionChannelId) return;
+    if (!client || !runtime.activeChannelId) return;
     try {
-      const channel = (await client.channels.fetch(sessionChannelId)) as TextChannel | null;
+      const channel = (await client.channels.fetch(runtime.activeChannelId)) as TextChannel | null;
       if (channel) await channel.delete("Pi session ended");
     } catch (err) {
       console.error("[pi-discord-remote] Failed to delete channel:", err);
     }
-    sessionChannelId = null;
-    sessionChannelName = null;
+    runtime.activeChannelId = null;
+    runtime.sessionChannelName = null;
     setStatusFn("pi-discord-remote", undefined);
   }
 
@@ -504,6 +402,8 @@ export default function (pi: ExtensionAPI) {
       await client.destroy().catch(() => {});
       client = null;
       activeConfig = null;
+      runtime.activeChannelId = null;
+      runtime.sessionChannelName = null;
     }
   });
 
@@ -537,7 +437,6 @@ export default function (pi: ExtensionAPI) {
     client.once("ready", async (c) => {
       // Create a new channel for this session
       const channelName = makeChannelName(cwd);
-      let listeningChannelId: string = cfg.channelId ?? "";
 
       try {
         const guild = await c.guilds.fetch(cfg.guildId);
@@ -547,12 +446,8 @@ export default function (pi: ExtensionAPI) {
           ...(cfg.categoryId ? { parent: cfg.categoryId } : {}),
           topic: `Pi session — ${cwd}`,
         });
-        listeningChannelId = newChannel.id;
-        sessionChannelId = newChannel.id;
-        sessionChannelName = channelName;
-        // Update the in-memory config so messageCreate checks the right channel
-        activeConfig = { ...cfg, channelId: listeningChannelId };
-        await saveConfig(activeConfig);
+        runtime.activeChannelId = newChannel.id;
+        runtime.sessionChannelName = channelName;
 
         const label = `🔌 Discord: #${channelName}`;
         notifyFn(`Connected as ${c.user.tag} → #${channelName}`, "success");
@@ -564,7 +459,7 @@ export default function (pi: ExtensionAPI) {
           `⚠️ Could not create channel (check Manage Channels permission). Falling back to configured channelId.`,
           "warning",
         );
-        activeConfig = { ...cfg };
+        runtime.activeChannelId = cfg.channelId ?? null;
         setStatusFn("pi-discord-remote", `🔌 Discord: ${c.user.tag} (fallback)`);
       }
     });
@@ -572,7 +467,7 @@ export default function (pi: ExtensionAPI) {
     client.on("messageCreate", async (message: Message) => {
       if (!activeConfig) return;
       if (message.author.bot) return;
-      if (message.channelId !== activeConfig.channelId) return;
+      if (message.channelId !== runtime.activeChannelId) return;
 
       if (
         activeConfig.allowedUserIds?.length &&
@@ -635,7 +530,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("before_agent_start", async (event, _ctx) => {
     if (!client?.isReady()) return;
-    const activeChannelId = sessionChannelId ?? activeConfig?.channelId;
+    const activeChannelId = runtime.activeChannelId ?? activeConfig?.channelId;
     return {
       systemPrompt:
         event.systemPrompt +
@@ -1036,6 +931,8 @@ export default function (pi: ExtensionAPI) {
           await client.destroy().catch(() => {});
           client = null;
           activeConfig = null;
+          runtime.activeChannelId = null;
+          runtime.sessionChannelName = null;
           ctx.ui.notify("Disconnected from Discord. Channel deleted.", "info");
           break;
         }
@@ -1045,8 +942,8 @@ export default function (pi: ExtensionAPI) {
           if (client?.isReady()) {
             ctx.ui.notify(
               `✅ Connected as ${client.user.tag}\n` +
-                `   Channel: #${sessionChannelName ?? activeConfig?.channelId}\n` +
-                `   Channel ID: ${sessionChannelId ?? activeConfig?.channelId ?? "(unknown)"}\n` +
+                `   Channel: #${runtime.sessionChannelName ?? runtime.activeChannelId ?? "(fallback)"}\n` +
+                `   Channel ID: ${runtime.activeChannelId ?? "(unknown)"}\n` +
                 `   Allow-list: ${activeConfig?.allowedUserIds?.join(", ") || "everyone"}`,
               "info",
             );
@@ -1062,19 +959,7 @@ export default function (pi: ExtensionAPI) {
         case "open-config": {
           const raw = existsSync(CONFIG_FILE)
             ? await readFile(CONFIG_FILE, "utf-8")
-            : JSON.stringify(
-                {
-                  token: "",
-                  guildId: "",
-                  categoryId: "",
-                  allowedUserIds: [],
-                  reactions: true,
-                  // Set to true to also post tool outputs/results after each tool call
-                  toolResponses: false,
-                },
-                null,
-                2,
-              ) + "\n";
+            : defaultConfigTemplate();
 
           const edited = await ctx.ui.editor("pi-discord-remote config.json", raw);
           if (!edited) return;
