@@ -21,20 +21,77 @@ export function makeChannelName(cwd: string): string {
     .slice(0, 100);
 }
 
-/** Split a string into ≤maxLen chunks, preferring newline boundaries. */
+/** Count how many unmatched ``` fences precede a position in the text. */
+function countOpenFences(text: string): number {
+  let count = 0;
+  let i = 0;
+  while (i < text.length) {
+    if (text[i] === "`" && text.slice(i, i + 3) === "```") {
+      count++;
+      i += 3;
+    } else if (text[i] === "`") {
+      // skip inline backticks — they don't affect fence state
+      while (i < text.length && text[i] === "`") i++;
+    } else {
+      i++;
+    }
+  }
+  return count;
+}
+
+/** Extract the info string (e.g. language) from an opening ``` fence line. */
+function fenceInfo(text: string): string {
+  // "```ts" → "ts", "```" → ""
+  const match = text.match(/^```(\S*)/);
+  return match ? match[1] ?? "" : "";
+}
+
+/** Find the info string of the most recent opening ``` fence before pos. */
+function lastFenceInfo(text: string): string {
+  const lines = text.split("\n");
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const stripped = lines[i].trimStart();
+    if (stripped.startsWith("```")) {
+      const info = fenceInfo(stripped);
+      // If there's content after ``` on the same line (not just info), it's a opening fence
+      // We count it as opening regardless — countOpenFences determines parity
+      return info;
+    }
+  }
+  return "";
+}
+
+/** Split a string into ≤maxLen chunks, preferring newline boundaries.
+ *  Preserves fenced code blocks (```) across chunk boundaries by closing
+ *  and reopening them. */
 export function splitMessage(text: string, maxLen = 1900): string[] {
   if (text.length <= maxLen) return [text];
   const chunks: string[] = [];
   let remaining = text;
   while (remaining.length > 0) {
     if (remaining.length <= maxLen) {
-      chunks.push(remaining);
+      // Close any unclosed fence in the final chunk
+      if (countOpenFences(remaining) % 2 === 1) {
+        chunks.push(remaining + "\n```");
+      } else {
+        chunks.push(remaining);
+      }
       break;
     }
     let cut = remaining.lastIndexOf("\n", maxLen);
     if (cut <= 0) cut = maxLen;
-    chunks.push(remaining.slice(0, cut));
+    const chunk = remaining.slice(0, cut);
     remaining = remaining.slice(cut).replace(/^\n/, "");
+
+    // Close any open code fence at the end of this chunk
+    if (countOpenFences(chunk) % 2 === 1) {
+      const info = lastFenceInfo(chunk);
+      chunks.push(chunk + "\n```");
+      // Reopen the fence at the start of the next chunk
+      remaining = "```" + info + "\n" + remaining;
+    } else {
+      chunks.push(chunk);
+    }
   }
   return chunks;
 }
