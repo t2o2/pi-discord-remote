@@ -1,6 +1,6 @@
 {
   "name": "pi-discord-remote",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "type": "module",
   "description": "Control your Pi coding-agent session from Discord — each session gets its own auto-created channel",
   "keywords": [
@@ -19,7 +19,8 @@
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "files": [
-    "dist/"
+    "dist/",
+    "demo.gif"
   ],
   "pi": {
     "extensions": [
