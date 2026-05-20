@@ -25,7 +25,8 @@
   "pi": {
     "extensions": [
       "./dist"
-    ]
+    ],
+    "image": "https://raw.githubusercontent.com/t2o2/pi-discord-remote/main/assets/banner.jpeg"
   },
   "scripts": {
     "build": "tsc",
