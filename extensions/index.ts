@@ -674,6 +674,10 @@ export default function (pi: ExtensionAPI) {
         resolve();
       });
     });
+    // If login() throws, nothing awaits readyPromise, so its timeout rejection would
+    // be unhandled and Node would exit the whole pi process. The no-op handler keeps
+    // the rejection visible to the `await` below.
+    readyPromise.catch(() => {});
 
     try {
       setStatusFn("pi-discord-remote", "🔌 Discord: connecting…");
