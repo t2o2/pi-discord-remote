@@ -4,7 +4,7 @@
 
 ![pi-discord-remote demo](demo.gif)
 
-Each time you run `/pi-discord-remote start`, the extension automatically creates a **new Discord text channel** named after your current project + date (e.g. `kaleidoscope-may09`). Messages sent in that channel are injected into Pi as user prompts; Pi's responses are posted back. When you stop, the channel is deleted — keeping your server clean within Discord's channel limit.
+Each time you run `/pi-discord-remote start`, the extension automatically creates a **new Discord text channel** named after your current project + date (e.g. `kaleidoscope-may09`), or whatever name you pass (`/pi-discord-remote start release-prep`). Messages sent in that channel are injected into Pi as user prompts; Pi's responses are posted back. When you stop, the channel is deleted — keeping your server clean within Discord's channel limit.
 
 ## Install
 
@@ -26,7 +26,7 @@ pi install npm:pi-discord-remote
 
 ```
 /pi-discord-remote setup        — configure token, server ID, optional category
-/pi-discord-remote start        — create channel + connect
+/pi-discord-remote start [name] — create channel (optionally named) + connect
 /pi-discord-remote stop         — delete channel + disconnect
 /pi-discord-remote status       — show connection state
 /pi-discord-remote open-config  — edit config JSON in Pi's editor
@@ -71,7 +71,7 @@ Edit config with `/pi-discord-remote open-config`.
 
 The extension loads silently on Pi startup — no channel is created until you explicitly run the command.
 
-- **`/pi-discord-remote start`** — bot logs in, creates a text channel named `<project>-<mon><dd>-<HHMM>`, and starts listening there only
+- **`/pi-discord-remote start [name]`** — bot logs in, creates a text channel named `<project>-<mon><dd>-<HHMM>` (or `name`, lowercased with other characters turned into `-`), and starts listening there only
 - **Incoming message** — injected as a user prompt into the active Pi session; bot reacts ⏳ while Pi works, then posts the full response back
 - **Tool calls** — each tool invocation is labeled (🔧 bash, 📄 read, ✏️ edit, etc.) with a detail line; if `toolResponses` is on, results follow as ↩️/❌ code blocks
 - **`/pi-discord-remote stop`** (or Pi exit) — channel is deleted, bot disconnects

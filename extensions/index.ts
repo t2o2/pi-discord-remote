@@ -1,8 +1,9 @@
 /**
  * pi-discord-remote — control this Pi session from Discord
  *
- * Each /pi-discord-remote start creates a fresh text channel named after the
- * current working directory + date (e.g. "kaleidoscope-may09").  On stop
+ * Each /pi-discord-remote start creates a fresh text channel, named after the
+ * current working directory + date (e.g. "kaleidoscope-may09") unless a name
+ * is given (/pi-discord-remote start release-prep).  On stop
  * (or session shutdown) the channel is deleted to stay within Discord's
  * per-server channel limit.
  *
@@ -11,11 +12,11 @@
  *   • Manage Channels                    (new — for create + rename)
  *
  * Commands:
- *   /pi-discord-remote setup       — interactive setup (token, guildId, categoryId, allowed users)
- *   /pi-discord-remote start       — create channel + connect
- *   /pi-discord-remote stop        — delete channel + disconnect
- *   /pi-discord-remote status      — show connection state
- *   /pi-discord-remote open-config — edit config.json in the editor
+ *   /pi-discord-remote setup        — interactive setup (token, guildId, categoryId, allowed users)
+ *   /pi-discord-remote start [name] — create channel (optionally named) + connect
+ *   /pi-discord-remote stop         — delete channel + disconnect
+ *   /pi-discord-remote status       — show connection state
+ *   /pi-discord-remote open-config  — edit config.json in the editor
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -597,6 +598,7 @@ export default function (pi: ExtensionAPI) {
     cwd: string,
     notifyFn: (msg: string, level: "success" | "error" | "warning" | "info") => void,
     setStatusFn: (key: string, val: string | undefined) => void,
+    requestedName?: string,
   ): Promise<void> {
     if (client) {
       notifyFn("Already connected to Discord.", "warning");
@@ -646,7 +648,7 @@ export default function (pi: ExtensionAPI) {
       client!.once("ready", async (c) => {
         clearTimeout(timeout);
         // Channel creation happens inside this single ready handler
-        const channelName = makeChannelName(cwd);
+        const channelName = makeChannelName(cwd, requestedName);
         try {
           const guild = await c.guilds.fetch(cfg.guildId);
           const newChannel = await guild.channels.create({
@@ -1100,6 +1102,7 @@ export default function (pi: ExtensionAPI) {
             ctx.cwd,
             (msg, level) => ctx.ui.notify(msg, level),
             (key, val) => ctx.ui.setStatus(key, val),
+            parts.slice(1).join(" "),
           );
           break;
         }
@@ -1177,11 +1180,11 @@ export default function (pi: ExtensionAPI) {
         default: {
           ctx.ui.notify(
             [
-              "/pi-discord-remote setup       — configure bot token, guild, category",
-              "/pi-discord-remote start       — create channel + connect",
-              "/pi-discord-remote stop        — delete channel + disconnect",
-              "/pi-discord-remote status      — show connection state",
-              "/pi-discord-remote open-config — edit config JSON",
+              "/pi-discord-remote setup        — configure bot token, guild, category",
+              "/pi-discord-remote start [name] — create channel (optionally named) + connect",
+              "/pi-discord-remote stop         — delete channel + disconnect",
+              "/pi-discord-remote status       — show connection state",
+              "/pi-discord-remote open-config  — edit config JSON",
             ].join("\n"),
             "info",
           );

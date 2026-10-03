@@ -4,15 +4,24 @@
 
 import { basename } from "node:path";
 
-/** Generate a Discord-safe channel name from cwd + short date + time (HH-MM). */
-export function makeChannelName(cwd: string): string {
+/**
+ * Generate a Discord-safe channel name. Uses `requestedName` when it has any
+ * usable characters; otherwise cwd basename + short date + time (HHMM).
+ */
+export function makeChannelName(cwd: string, requestedName = ""): string {
+  const requested = toChannelName(requestedName);
+  if (requested) return requested;
   const dir = basename(cwd) || "pi";
   const now = new Date();
   const month = now.toLocaleString("en-US", { month: "short" }).toLowerCase();
   const day = String(now.getDate()).padStart(2, "0");
   const hh = String(now.getHours()).padStart(2, "0");
   const mm = String(now.getMinutes()).padStart(2, "0");
-  const raw = `${dir}-${month}${day}-${hh}${mm}`;
+  return toChannelName(`${dir}-${month}${day}-${hh}${mm}`);
+}
+
+/** Discord text-channel rules: lowercase a-z 0-9 - _, no repeated or edge dashes, ≤ 100 chars. */
+function toChannelName(raw: string): string {
   return raw
     .toLowerCase()
     .replace(/[^a-z0-9\-_]/g, "-")

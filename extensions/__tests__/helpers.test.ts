@@ -54,6 +54,20 @@ describe("makeChannelName", () => {
     // Should match pattern like "my-project-may18-1430"
     expect(name).toMatch(/^my-project-[a-z]{3}\d{2}-\d{4}$/);
   });
+
+  it("uses a requested name as-is, without the date suffix", () => {
+    expect(makeChannelName("/my-project", "release-prep")).toBe("release-prep");
+  });
+
+  it("applies Discord channel rules to a requested name", () => {
+    expect(makeChannelName("/my-project", "  Release Prep: v2!  ")).toBe("release-prep-v2");
+    expect(makeChannelName("/my-project", "y".repeat(150))).toBe("y".repeat(100));
+  });
+
+  it("falls back to the cwd-based name when the requested name has no usable characters", () => {
+    expect(makeChannelName("/my-project", "!!! ???")).toMatch(/^my-project-[a-z]{3}\d{2}-\d{4}$/);
+    expect(makeChannelName("/my-project", "")).toMatch(/^my-project-[a-z]{3}\d{2}-\d{4}$/);
+  });
 });
 
 // ─── splitMessage ─────────────────────────────────────────────────────────────
