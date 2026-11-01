@@ -4,6 +4,17 @@
 
 import { basename } from "node:path";
 
+/** Discord-safe, stable channel name for a project directory (no date/time). */
+export function projectChannelName(cwd: string): string {
+  const dir = basename(cwd) || "pi";
+  const raw = dir
+    .toLowerCase()
+    .replace(/[^a-z0-9-_]/g, "-")
+    .replace(/-{2,}/g, "-")
+    .replace(/^-|-$/g, "");
+  return (raw || "pi").slice(0, 50);
+}
+
 /** Generate a Discord-safe channel name from cwd + short date + time (HH-MM). */
 export function makeChannelName(cwd: string): string {
   const dir = basename(cwd) || "pi";
@@ -150,4 +161,40 @@ export async function withTimeout<T>(
   } finally {
     if (timer) clearTimeout(timer);
   }
+}
+
+export type InboundAction = "queue" | "steer" | "reject";
+
+/**
+ * Decide how an inbound Discord message should be delivered to Pi.
+ * Idle -> normal turn. Busy -> steer (if steering enabled), otherwise reject.
+ */
+export function inboundAction(busy: boolean, steeringEnabled: boolean): InboundAction {
+  if (!busy) return "queue";
+  return steeringEnabled ? "steer" : "reject";
+}
+
+/**
+ * Cut a growing stream into Discord-sized chunks, preferring paragraph
+ * boundaries. Returns the completed chunks plus the remainder still buffered.
+ */
+export function drainChunks(
+  pending: string,
+  limit: number,
+  force = false,
+): { chunks: string[]; rest: string } {
+  const chunks: string[] = [];
+  let s = pending;
+  while (s.length >= limit) {
+    const window = s.slice(0, limit);
+    const cut = window.lastIndexOf("\n\n");
+    const take = cut >= Math.floor(limit * 0.4) ? cut + 2 : limit;
+    chunks.push(s.slice(0, take));
+    s = s.slice(take);
+  }
+  if (force && s.trim()) {
+    chunks.push(s);
+    s = "";
+  }
+  return { chunks, rest: s };
 }

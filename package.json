@@ -1,8 +1,8 @@
 {
   "name": "pi-discord-remote",
-  "version": "0.2.4",
+  "version": "0.3.0",
   "type": "module",
-  "description": "Control your Pi coding-agent session from Discord — each session gets its own auto-created channel",
+  "description": "Control this Pi session from Discord \u2014 streaming output, steering, thinking, and local-TUI mirroring (fork of pi-discord-remote)",
   "keywords": [
     "pi-package",
     "pi-extension",

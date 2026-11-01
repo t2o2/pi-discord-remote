@@ -3,6 +3,9 @@ import { mkdir, writeFile, readFile, rename, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
+// Isolate config-file tests from the real ~/.pi/agent/pi-discord-remote config.
+process.env.PI_DISCORD_CONFIG_DIR = join(tmpdir(), `pi-discord-remote-test-${process.pid}`);
+
 // ─── defaultConfigTemplate ────────────────────────────────────────────────────
 
 describe("defaultConfigTemplate", () => {

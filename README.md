@@ -64,6 +64,16 @@ For CI or headless setups, you can skip `setup` entirely and set these env vars:
 | `allowedUserIds` | string[] | `[]` | Allow-list of Discord user IDs (empty = everyone) |
 | `reactions` | boolean | `true` | React with ⏳ while processing |
 | `toolResponses` | boolean | `false` | Also post tool outputs/results alongside tool-call labels (truncated to ≤400 chars) |
+| `toolCalls` | boolean | `true` | Post tool-call labels (🔧 bash, ✏️ edit, …) |
+| `stream` | boolean | `true` | Stream assistant text/thinking in chunks while the turn runs, instead of posting only at turn end |
+| `thinking` | boolean | `true` | Send reasoning/thinking blocks to Discord (prefix `💭`) |
+| `steering` | boolean | `true` | Messages sent while Pi is busy steer the running turn instead of being rejected |
+| `mirrorLocalInput` | boolean | `true` | Post prompts typed in the local TUI to the Discord channel (prefix `🖥️`) |
+| `typing` | boolean | `true` | Show a Discord typing indicator while Pi is working |
+| `mention` | boolean | `true` | Tag the user (`<@id>`) on the final response of each turn |
+| `chunkChars` | number | `1900` | Soft chunk size for streamed messages (max 1900) |
+| `keepChannel` | boolean | `false` | Keep the session channel after stop/shutdown instead of deleting it |
+| `autoConnect` | boolean | `false` | Connect on Pi startup (useful for headless/`--print`/RPC sessions) |
 
 Edit config with `/pi-discord-remote open-config`.
 
@@ -75,6 +85,18 @@ The extension loads silently on Pi startup — no channel is created until you e
 - **Incoming message** — injected as a user prompt into the active Pi session; bot reacts ⏳ while Pi works, then posts the full response back
 - **Tool calls** — each tool invocation is labeled (🔧 bash, 📄 read, ✏️ edit, etc.) with a detail line; if `toolResponses` is on, results follow as ↩️/❌ code blocks
 - **`/pi-discord-remote stop`** (or Pi exit) — channel is deleted, bot disconnects
+
+### Steering and local activity
+
+- **Steering**: while a turn is running, a new Discord message is injected into the
+  running turn via `pi.sendUserMessage(..., { deliverAs: "steer" })` (react 📥).
+  Set `"steering": false` to go back to the old "please wait" behaviour.
+- **Local TUI prompts are mirrored** (`🖥️ …`) so the remote view never goes silent
+  when you work at the keyboard — output is posted to the session channel regardless
+  of who started the turn.
+- **Thinking is streamed** as `💭 …` chunks (disable with `"thinking": false`).
+- **Abort from Discord**: react 🛑 on any bot message, send a bare `🛑` / `stop`
+  message, or run `/pi-discord-remote abort` in Pi.
 
 ### Optional image skill tool
 
@@ -101,6 +123,18 @@ Pi's TUI-only `ask_user_question` dialog (from `@juicesharp/rpiv-ask-user-questi
 3. **Hints** the LLM via `before_agent_start` to prefer `discord_ask_user_question` when Discord is connected
 
 When Discord **is not** connected, the original `ask_user_question` (TUI dialog) works normally as a fallback. No need to uninstall `@juicesharp/rpiv-ask-user-question` — the two extensions coexist gracefully.
+
+## Diagnosing connection problems
+
+Every Discord event (connect, gateway disconnect, reconnect attempt, login error, send/mention/reaction failure, 🛑 abort) is appended to:
+
+```text
+~/.pi/agent/pi-discord-remote/diagnostics.log     # override with PI_DISCORD_LOG_DIR
+```
+
+- `/pi-discord-remote status` — channel, output target, gateway ready state, last posted message id, last error
+- `/pi-discord-remote debug 50` — tail the last 50 log lines inside Pi
+- The log is plain text, so an agent with shell access can read it directly
 
 ## License
 
