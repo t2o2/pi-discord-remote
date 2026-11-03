@@ -41,6 +41,8 @@ import {
   isAbortLikeError,
   sleep,
   withTimeout,
+  isTuiAskTool,
+  planAskToolSwap,
 } from "./helpers.js";
 
 // ─── Reconnection constants ──────────────────────────────────────────────────
@@ -692,20 +694,36 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
-  // ── Intercept ask_user_question → redirect to Discord version ─────────
+  // ── Intercept terminal ask tools → redirect to Discord version ────────
 
-  // When Discord is connected, block the original ask_user_question (TUI-only)
-  // and tell the LLM to use discord_ask_user_question instead.
-  // When Discord is not connected, let the original tool through as fallback.
+  // A "Discord turn" is one triggered by a Discord message: only then is there
+  // a channel to send questions to. For prompts typed in the terminal the TUI
+  // ask tools keep working, so the user is asked where they are.
+  const isDiscordTurn = () => !!client?.isReady() && !!pendingReplyChannelId;
+
+  // Terminal ask tools hidden from the model on Discord turns, restored after.
+  let hiddenAskTools: string[] = [];
+
+  // Covers both `ask_user_question` (rpiv-ask-user-question) and `ask_user`
+  // (pi-ask-user). Blocking is a backstop; the tools are normally hidden from
+  // the model entirely in before_agent_start.
   pi.on("tool_call", async (event, _ctx) => {
-    if (event.toolName !== "ask_user_question") return;
-    if (!client?.isReady()) return; // Discord not ready — let TUI tool work
+    if (!isTuiAskTool(event.toolName)) return;
+    if (!isDiscordTurn()) return; // not a Discord turn — let TUI tool work
     return { block: true, reason: "Discord is connected — use discord_ask_user_question instead." };
   });
 
-  // ── System prompt hint: prefer Discord version when connected ──────────
+  // ── System prompt hint: prefer Discord version on Discord turns ────────
 
   pi.on("before_agent_start", async (event, _ctx) => {
+    const discordTurn = isDiscordTurn();
+
+    const swap = planAskToolSwap(pi.getActiveTools(), hiddenAskTools, discordTurn);
+    if (swap) {
+      pi.setActiveTools(swap.active);
+      hiddenAskTools = swap.hidden;
+    }
+
     if (!client?.isReady()) return;
     const activeChannelId = runtime.activeChannelId ?? activeConfig?.channelId;
     return {
@@ -716,11 +734,13 @@ export default function (pi: ExtensionAPI) {
           ? `Active Discord session channel ID: ${activeChannelId}. ` +
             "When using discord_send_image, pass this as channelId.\n\n"
           : "") +
-        "When you need to ask the user a clarifying question, use the " +
-        "discord_ask_user_question tool instead of ask_user_question. " +
-        "The Discord version sends questions to the user's Discord channel. " +
-        "If discord_ask_user_question returns an error about no UI, " +
-        "fall back to ask_user_question.",
+        (discordTurn
+          ? "When you need to ask the user a clarifying question, use the " +
+            "discord_ask_user_question tool. The terminal-only ask_user / " +
+            "ask_user_question tools are unavailable for this request " +
+            "(this overrides any skill or instruction that says to use ask_user). " +
+            "The Discord version sends questions to the user's Discord channel."
+          : ""),
     };
   });
 

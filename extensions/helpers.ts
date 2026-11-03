@@ -151,3 +151,46 @@ export async function withTimeout<T>(
     if (timer) clearTimeout(timer);
   }
 }
+
+// ─── Terminal-only "ask the user" tools ─────────────────────────────────────
+
+/**
+ * Names of terminal-only question tools that Discord cannot see:
+ * `ask_user_question` (@juicesharp/rpiv-ask-user-question) and
+ * `ask_user` (pi-ask-user).
+ */
+export const TUI_ASK_TOOLS: readonly string[] = ["ask_user", "ask_user_question"];
+
+export function isTuiAskTool(toolName: string): boolean {
+  return TUI_ASK_TOOLS.includes(toolName);
+}
+
+/**
+ * Decide how the active tool list should change before a turn.
+ *
+ * - Discord turn: remove the terminal ask tools (remembering which ones were
+ *   removed) so the model only sees `discord_ask_user_question`.
+ * - Otherwise: restore only the tools we removed earlier, leaving tools the
+ *   user disabled themselves untouched.
+ *
+ * Returns `null` when nothing needs to change.
+ */
+export function planAskToolSwap(
+  active: readonly string[],
+  hidden: readonly string[],
+  discordTurn: boolean,
+): { active: string[]; hidden: string[] } | null {
+  if (discordTurn) {
+    const toHide = active.filter(isTuiAskTool);
+    if (toHide.length === 0) return null;
+    return {
+      active: active.filter((n) => !isTuiAskTool(n)),
+      hidden: [...new Set([...hidden, ...toHide])],
+    };
+  }
+  if (hidden.length === 0) return null;
+  return {
+    active: [...active, ...hidden.filter((n) => !active.includes(n))],
+    hidden: [],
+  };
+}

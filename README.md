@@ -92,15 +92,16 @@ Exactly one source should be provided per call. If omitted, the tool falls back 
 
 The tool returns explicit send errors (for example `unknown_channel:<id>` or timeout/HTTP errors) instead of silently forwarding images.
 
-### `ask_user_question` → Discord
+### `ask_user_question` / `ask_user` → Discord
 
-Pi's TUI-only `ask_user_question` dialog (from `@juicesharp/rpiv-ask-user-question`) is invisible over Discord remote. When Discord is connected, pi-discord-remote:
+Pi's TUI-only question dialogs are invisible over Discord remote. Two are supported: `ask_user_question` (from `@juicesharp/rpiv-ask-user-question`) and `ask_user` (from `pi-ask-user`). When a prompt arrives **from Discord**, pi-discord-remote:
 
-1. **Blocks** the original `ask_user_question` via `tool_call` event interception — the TUI dialog never appears
-2. **Registers** `discord_ask_user_question` — a drop-in replacement that formats questions as Discord messages and collects answers from the channel
-3. **Hints** the LLM via `before_agent_start` to prefer `discord_ask_user_question` when Discord is connected
+1. **Hides** the TUI ask tools from the model for that turn (via `pi.setActiveTools`), and restores them afterwards
+2. **Blocks** them via `tool_call` event interception as a backstop — the TUI dialog never appears
+3. **Registers** `discord_ask_user_question` — a drop-in replacement that formats questions as Discord messages and collects answers from the channel
+4. **Hints** the LLM via `before_agent_start` to use `discord_ask_user_question`
 
-When Discord **is not** connected, the original `ask_user_question` (TUI dialog) works normally as a fallback. No need to uninstall `@juicesharp/rpiv-ask-user-question` — the two extensions coexist gracefully.
+When Discord **is not** connected, or the prompt was typed in the terminal, the original TUI dialog works normally, so you are asked wherever you are. No need to uninstall the TUI ask extensions — they coexist gracefully.
 
 ## License
 
