@@ -229,3 +229,59 @@ describe("withTimeout", () => {
     await withTimeout(Promise.resolve("ok"), 10_000, "timer_cleanup");
   });
 });
+
+// ─── Terminal ask-tool handling ─────────────────────────────────────────────
+
+import { isTuiAskTool, planAskToolSwap } from "../helpers.js";
+
+describe("isTuiAskTool", () => {
+  it("matches both ask_user and ask_user_question", () => {
+    expect(isTuiAskTool("ask_user")).toBe(true);
+    expect(isTuiAskTool("ask_user_question")).toBe(true);
+  });
+
+  it("does not match the Discord tool or unrelated tools", () => {
+    expect(isTuiAskTool("discord_ask_user_question")).toBe(false);
+    expect(isTuiAskTool("bash")).toBe(false);
+  });
+});
+
+describe("planAskToolSwap", () => {
+  it("hides terminal ask tools on a Discord turn and remembers them", () => {
+    const plan = planAskToolSwap(["bash", "ask_user", "discord_ask_user_question"], [], true);
+    expect(plan).toEqual({
+      active: ["bash", "discord_ask_user_question"],
+      hidden: ["ask_user"],
+    });
+  });
+
+  it("hides both tools when both are active", () => {
+    const plan = planAskToolSwap(["ask_user", "ask_user_question", "bash"], [], true);
+    expect(plan?.active).toEqual(["bash"]);
+    expect(plan?.hidden).toEqual(["ask_user", "ask_user_question"]);
+  });
+
+  it("returns null on a Discord turn when nothing needs hiding", () => {
+    expect(planAskToolSwap(["bash"], [], true)).toBeNull();
+  });
+
+  it("restores only previously hidden tools on a non-Discord turn", () => {
+    const plan = planAskToolSwap(["bash"], ["ask_user"], false);
+    expect(plan).toEqual({ active: ["bash", "ask_user"], hidden: [] });
+  });
+
+  it("does not duplicate a tool that is already active when restoring", () => {
+    const plan = planAskToolSwap(["bash", "ask_user"], ["ask_user"], false);
+    expect(plan?.active).toEqual(["bash", "ask_user"]);
+  });
+
+  it("returns null on a non-Discord turn when nothing was hidden", () => {
+    expect(planAskToolSwap(["bash", "ask_user"], [], false)).toBeNull();
+  });
+
+  it("leaves tools the user disabled alone", () => {
+    // ask_user_question was never active, so it is neither hidden nor restored
+    const plan = planAskToolSwap(["bash", "ask_user"], [], true);
+    expect(plan?.hidden).toEqual(["ask_user"]);
+  });
+});
